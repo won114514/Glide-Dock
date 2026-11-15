@@ -21,7 +21,7 @@ Glide-Dock 是一个用 **Rust + Win32** 实现的常驻桌面启动栏：首次
 
 ## 当前状态
 
-**v0.4.0 · M2 MVP 已完成，M3 部分完成，M4 设置中心与五层动效系统已落地。**
+**v0.4.1 · M2 MVP 已完成，M3 部分完成，M4 设置中心与五层动效系统已落地。**
 
 | 能力 | 状态 |
 | --- | --- |
@@ -57,7 +57,7 @@ Glide-Dock 是一个用 **Rust + Win32** 实现的常驻桌面启动栏：首次
 | 设置中心「诊断与维护」页：拖拽、UAC、守护、启动、快捷方式 | ✅ 已实现 |
 | 自动隐藏 / 全局热键 | ⬜ 未实现 |
 | 开机自启动（计划任务 / HKCU Run 双模式） | ✅ 已实现 |
-| 应用安装包（Inno Setup，带卸载清理） | ✅ 已实现 |
+| 应用安装包（自有品牌 WinUI 3 安装器与卸载器） | ✅ 已实现 |
 | 多显示器切换记忆 | 🟡 依赖 `WM_DISPLAYCHANGE` 重排，未完整记忆 |
 | 任务切换 / 时钟/CPU 数据小组件 | ⬜ 计划 M5 |
 
@@ -85,10 +85,10 @@ Glide-Dock 是一个用 **Rust + Win32** 实现的常驻桌面启动栏：首次
 > Medium 完整性包，或把 zip 解压到桌面再运行。
 
 ```powershell
-# 推荐：构建并打包到 %LOCALAPPDATA%\Glide-Dock\Glide-Dock-v0.4.0（Medium 完整性）
+# 推荐：构建并打包到 %LOCALAPPDATA%\Glide-Dock\Glide-Dock-v0.4.1（Medium 完整性）
 powershell -ExecutionPolicy Bypass -File scripts/package.ps1
 
-# 构建安装包（Inno Setup 6；输出到 %LOCALAPPDATA%\Glide-Dock\installer）
+# 构建品牌安装包（单文件 Setup.exe；输出到 %LOCALAPPDATA%\Glide-Dock\installer）
 powershell -ExecutionPolicy Bypass -File scripts/build-installer.ps1
 
 # 空白 Dock（仅适合从普通目录运行）
@@ -369,7 +369,7 @@ cargo run -p glide-dock -- --render-preview preview
 
 - 自动隐藏与全局热键尚未接线（Dock 已支持双模式开机自启动）。
 - 多显示器切换只会在 `WM_DISPLAYCHANGE` 时重新排布，未记忆具体显示器。
-- 设置中心是独立自包含 WinUI 3 进程，发布目录约 166 MB；构建需要 .NET 8 SDK。
+- 设置中心是独立自包含 WinUI 3 进程，发布目录约 184 MB（含内置 Noto Sans SC 字体）；构建需要 .NET 8 SDK。
 - UWP/Store 应用请通过开始菜单快捷方式（`.lnk`）加入；直接加入其 WindowsApps
   `.exe` 可能无法激活包身份。
 - 运行状态由 `SetWinEventHook` 窗口事件驱动；启动等待由可见窗口确认或 12 s 超时

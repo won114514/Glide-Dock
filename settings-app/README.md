@@ -35,8 +35,9 @@ The dock automatically finds it at:
 5. the repository's `settings-app/bin/x64/Release/.../GlideDock.Settings.exe` (development)
 
 For distribution, copy the whole `settings-app/publish` folder next to the dock as
-`settings/` (166 MB). The folder already contains `.NET`, Windows App SDK and the
-WinUI runtime, so users do not need a separate .NET installation.
+`settings/` (about 184 MB, including the bundled Noto Sans SC font). The folder already
+contains `.NET`, Windows App SDK and the WinUI runtime, so users do not need a separate
+.NET installation.
 
 Manual build:
 
@@ -82,9 +83,11 @@ For every edit the C# side:
    temporary file + `Flush(true)` + rename.
 
 `WM_COPYDATA.dwData` is the ASCII magic `GLID` (`0x474C4944`) and `wParam` is the
-settings window handle. The dock verifies that the sender process is the settings child
-it spawned, deserializes `DockConfig`, applies only `appearance`, `behavior`, `motion`
-and `monitor` fields, relayouts and redraws. It keeps its own item list, so a settings
+settings window handle. The payload starts with two little-endian `u32` values: protocol
+version (`1`) and UTF-8 JSON byte length, followed by the JSON. The dock rejects unknown
+versions, mismatched lengths, and payloads above 256 KiB before deserializing. It verifies
+that the sender process is the settings child it spawned and applies only `appearance`,
+`behavior`, `motion` and `monitor` fields. It keeps its own item list, so a settings
 window opened with a stale copy can never reorder, duplicate, or delete dock entries.
 
 ## UI
@@ -94,7 +97,11 @@ window opened with a stale copy can never reorder, duplicate, or delete dock ent
 - The whole empty title-bar strip is draggable; the search box and caption buttons remain
   interactive. Window position is remembered in `settings-window.txt` next to the
   configuration file, so it does not jump back to the center on every launch.
-- Left navigation: 常规 / 外观 / 行为 / 动画 / 诊断与维护 / 关于, with a collapsible pane.
+- Left navigation: 常规 / 外观 / 行为 / 动画 / 诊断与维护 / 关于; the pane adapts to
+  the available width and the window can be resized.
+- **常规**: theme, accent, a bundled Noto Sans SC / Windows system-font switch, config
+  path, reset, Dock layer and the expandable startup card. The font choice is stored in
+  `settings-ui.json` beside the config and does not enter the Dock's runtime config.
 - **常规**: theme, accent, config path, reset, Dock layer and the expandable startup card.
 - Page switches use a short fade/slide; expandable cards fade their content in.
 - Search shows a dedicated result page with a count and empty state, matching titles/descriptions/keywords.
@@ -127,12 +134,11 @@ window opened with a stale copy can never reorder, duplicate, or delete dock ent
 
 ## Installer
 
-`scripts/build-installer.ps1` builds a per-machine Inno Setup installer with a
-single Start Menu/optional desktop Dock shortcut, an uninstaller, and cleanup of
-the `Glide-Dock` scheduled task plus HKCU Run value. Settings is opened from the
-Dock right-click → 设置... menu; there is no separate settings shortcut. It
-installs to `%ProgramFiles%\Glide-Dock` and preserves `%APPDATA%\Glide-Dock` on
-uninstall.
+`scripts/build-installer.ps1` publishes the custom WinUI 3 Setup.exe. It supports
+per-user and per-machine installs, first-run configuration, in-place upgrades,
+and a branded uninstaller. Settings is opened from the Dock right-click → 设置...
+menu; there is no separate settings shortcut. User configuration remains under
+`%APPDATA%\Glide-Dock` and is preserved on uninstall.
 
 ## Config fields written by the settings app
 

@@ -1227,3 +1227,16 @@ M1–M6 的逐条任务卡、依赖关系、工时估算、门禁清单与验证
 | M2 MVP 闭环 | T2.1–T2.10 | PLAN §4 |
 | M3 桌面级体验 | T3.1–T3.7 | PLAN §5 |
 | M4–M6 | 概要级 | PLAN §6 |
+
+## 20. 设置宿主与界面更新（2026-11-15）
+
+- Dock 侧设置进程生命周期与 IPC 收入 `app/src/app/settings.rs`；`DockApp` 持有
+  `SettingsHost`，负责启动、复用、关闭子进程，配置处理仍运行在 Dock UI 线程。
+- `WM_COPYDATA` 保留 `GLID` 消息标识，载荷增加 little-endian 版本与 JSON 长度头；
+  接收端验证发送子进程、版本、长度及 256 KiB 上限后再解析配置。
+- 设置窗口字体偏好保存在配置旁的 `settings-ui.json`，与 Dock `config.json`
+  分离，避免因 Dock 单写者同步而覆盖或被配置 schema 丢弃。
+- 设置窗口内置 Noto Sans SC TTF（SIL OFL 1.1），不安装到系统字体目录；用户可
+  切回 Windows 系统字体。发布包保留字体及 OFL 文本。
+- 设置窗口可缩放，导航根据可用宽度折叠；卡片不再用固定最小宽度，控制字号和
+  内容间距统一到设置页的阅读尺度。

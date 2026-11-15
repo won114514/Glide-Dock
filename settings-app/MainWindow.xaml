@@ -5,29 +5,29 @@
       <local:ValueLabelConverter x:Key="ValueLabelConverter" />
     </Grid.Resources>
     <Grid.RowDefinitions>
-      <RowDefinition Height="52" />
+      <RowDefinition Height="60" />
       <RowDefinition Height="*" />
     </Grid.RowDefinitions>
     <!-- Title bar: the transparent border is the drag region; interactive controls sit above it. -->
     <Grid x:Name="TitleBarHost" Grid.Row="0">
       <Border x:Name="TitleBarDragRegion" Background="Transparent" />
-      <Grid Padding="16,0,0,0">
+      <Grid Padding="18,0,0,0">
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="Auto" />
           <ColumnDefinition Width="*" />
           <ColumnDefinition Width="150" />
         </Grid.ColumnDefinitions>
         <StackPanel x:Name="TitleDragArea" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center" IsHitTestVisible="False">
-          <Border Width="26" Height="26" Background="Transparent" CornerRadius="7">
+          <Border Width="28" Height="28" Background="Transparent" CornerRadius="7">
             <Image Source="ms-appx:///Assets/Glide-Dock-FullColor-128.png" Stretch="Uniform" />
           </Border>
-          <TextBlock VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Glide-Dock" />
+          <TextBlock VerticalAlignment="Center" FontSize="15" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" Text="Glide-Dock" />
         </StackPanel>
-        <AutoSuggestBox x:Name="SearchBox" Grid.Column="1" Width="420" HorizontalAlignment="Center" VerticalAlignment="Center" PlaceholderText="搜索设置" QueryIcon="Find" TextChanged="SearchBox_TextChanged" QuerySubmitted="SearchBox_QuerySubmitted" />
+        <AutoSuggestBox x:Name="SearchBox" Grid.Column="1" MinWidth="160" Margin="16,0,12,0" HorizontalAlignment="Stretch" VerticalAlignment="Center" PlaceholderText="搜索设置" QueryIcon="Find" TextChanged="SearchBox_TextChanged" QuerySubmitted="SearchBox_QuerySubmitted" />
         <Grid Grid.Column="2" />
       </Grid>
     </Grid>
-    <NavigationView x:Name="NavView" Grid.Row="1" Background="Transparent" CompactPaneLength="48" IsBackButtonVisible="Collapsed" IsPaneOpen="True" IsPaneToggleButtonVisible="True" IsSettingsVisible="False" OpenPaneLength="224" PaneDisplayMode="Left" SelectionChanged="NavView_SelectionChanged" SelectionFollowsFocus="Disabled">
+    <NavigationView x:Name="NavView" Grid.Row="1" Background="Transparent" CompactPaneLength="50" IsBackButtonVisible="Collapsed" IsPaneOpen="True" IsPaneToggleButtonVisible="True" IsSettingsVisible="False" OpenPaneLength="220" PaneDisplayMode="Auto" SelectionChanged="NavView_SelectionChanged" SelectionFollowsFocus="Disabled">
       <NavigationView.MenuItems>
         <NavigationViewItem Content="常规" Tag="general">
           <NavigationViewItem.Icon>
@@ -62,14 +62,14 @@
       </NavigationView.MenuItems>
       <NavigationView.Content>
         <ScrollViewer x:Name="ContentScroll" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
-          <StackPanel x:Name="PageHost" MaxWidth="920" Padding="24,10,24,36" HorizontalAlignment="Center" Spacing="8">
+          <StackPanel x:Name="PageHost" MaxWidth="1040" Padding="30,20,30,44" HorizontalAlignment="Stretch" Spacing="8">
             <StackPanel.RenderTransform>
               <TranslateTransform x:Name="PageTransform" />
             </StackPanel.RenderTransform>
-            <Grid Margin="4,0,4,10">
+            <Grid Margin="4,0,4,14">
               <StackPanel Spacing="2">
-                <TextBlock x:Name="PageTitle" FontSize="30" FontWeight="SemiBold" Text="常规" />
-                <TextBlock x:Name="PageSubtitle" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="连接、主题与配置文件。" TextWrapping="Wrap" />
+                <TextBlock x:Name="PageTitle" FontSize="32" FontWeight="SemiBold" Text="常规" />
+                <TextBlock x:Name="PageSubtitle" FontSize="15" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="主题、强调色与配置文件。" TextWrapping="Wrap" />
               </StackPanel>
             </Grid>
             <!-- General -->
@@ -86,6 +86,14 @@
               <controls:SettingsCard Title="强调色" Description="影响运行圆点、拖拽指示条与选中态。" IconSymbol="FontColor">
                 <controls:SettingsCard.CardContent>
                   <StackPanel x:Name="AccentPanel" Orientation="Horizontal" Spacing="8" />
+                </controls:SettingsCard.CardContent>
+              </controls:SettingsCard>
+              <controls:SettingsCard Title="设置窗口字体" Description="使用内置 Noto Sans SC，或切回 Windows 系统字体。" IconSymbol="FontColor">
+                <controls:SettingsCard.CardContent>
+                  <ComboBox x:Name="FontCombo" Width="224" SelectionChanged="FontCombo_SelectionChanged">
+                    <ComboBoxItem Content="Noto Sans SC（内置）" Tag="noto-sans-sc" />
+                    <ComboBoxItem Content="系统字体" Tag="system" />
+                  </ComboBox>
                 </controls:SettingsCard.CardContent>
               </controls:SettingsCard>
               <controls:SettingsCard x:Name="ConfigCard" Title="配置文件" Description="…" IconSymbol="Folder">
@@ -287,7 +295,7 @@
             </StackPanel>
             <!-- Diagnostics -->
             <StackPanel x:Name="DiagnosticsPage" Spacing="0" Visibility="Collapsed">
-              <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="20" Margin="0,0,0,6" MaxWidth="840" HorizontalAlignment="Stretch">
+              <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="20" Margin="0,0,0,8" HorizontalAlignment="Stretch">
                 <Grid ColumnSpacing="16">
                   <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="44" />
@@ -311,7 +319,7 @@
                   </StackPanel>
                 </Grid>
               </Border>
-              <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="20" Margin="0,0,0,6" MaxWidth="840" HorizontalAlignment="Stretch">
+              <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="20" Margin="0,0,0,8" HorizontalAlignment="Stretch">
                 <Grid ColumnSpacing="16">
                   <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="44" />
@@ -350,9 +358,9 @@
                   </StackPanel>
                 </Grid>
               </Border>
-              <controls:SettingsCard Title="许可证" Description="Glide-Dock 源代码：MIT OR Apache-2.0。" IconSymbol="Help">
+              <controls:SettingsCard Title="许可证" Description="Glide-Dock：MIT OR Apache-2.0；内置 Noto Sans SC：SIL OFL 1.1。" IconSymbol="Help">
                 <controls:SettingsCard.CardContent>
-                  <TextBlock Text="MIT / Apache-2.0" />
+                  <TextBlock Text="MIT / Apache-2.0 · SIL OFL 1.1" TextWrapping="Wrap" />
                 </controls:SettingsCard.CardContent>
               </controls:SettingsCard>
               <controls:SettingsCard Title="配置文件" Description="当前设置进程读取的 JSON 配置。" IconSymbol="Folder">

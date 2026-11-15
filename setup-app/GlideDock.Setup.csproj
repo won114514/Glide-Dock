@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>GlideDock.Setup</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>GlideDock.Setup</AssemblyName>
+    <Version>0.4.1</Version>
+    <InformationalVersion>0.4.1</InformationalVersion>
+    <ApplicationIcon>..\assets\brand\03-Windows-ICO\Glide-Dock-FullColor.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.7.260224002" />
+    <Content Include="..\assets\brand\01-Logo\Glide-Dock-Logo-Horizontal.png"
+             Link="Assets\Glide-Dock-Logo-Horizontal.png"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\assets\brand\04-Showcase\Glide-Dock-Dock-Preview.png"
+             Link="Assets\Glide-Dock-Dock-Preview.png"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <EmbeddedResource Include="$(PayloadArchive)"
+                      LogicalName="GlideDock.Setup.Payload.zip"
+                      Condition="'$(PayloadArchive)' != '' and Exists('$(PayloadArchive)')" />
+  </ItemGroup>
+</Project>

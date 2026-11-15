@@ -15,8 +15,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <AssemblyName>GlideDock.Settings</AssemblyName>
-    <Version>0.4.0</Version>
-    <InformationalVersion>0.4.0</InformationalVersion>
+    <Version>0.4.1</Version>
+    <InformationalVersion>0.4.1</InformationalVersion>
     <ApplicationIcon>Assets\Glide-Dock-FullColor.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
@@ -26,6 +26,14 @@
     </Content>
     <Content Include="Assets\Glide-Dock-FullColor-128.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Assets\Fonts\NotoSansSC-VF.ttf">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="licenses\OFL-1.1.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
   </ItemGroup>
 </Project>

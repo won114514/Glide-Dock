@@ -1,41 +1,35 @@
 # Glide-Dock installer
 
-The installer is built with Inno Setup 6.
+Build the branded WinUI 3 installer with:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build-installer.ps1
 ```
 
-The script:
+The build publishes the Rust Dock and WinUI 3 settings app, stages the runnable
+distribution, compresses it into the Setup application's embedded payload, and
+publishes one `Glide-Dock-v<version>-Setup.exe` to
+`%LOCALAPPDATA%\Glide-Dock\installer`. A matching `.sha256` file is written
+beside the installer. Use `-OutputDirectory <path>` to choose another output
+directory, for example `dist\installer` in automation.
 
-1. builds the Rust dock;
-2. publishes the self-contained WinUI 3 settings center;
-3. creates the portable package stage and ZIP;
-4. compiles `installer\Glide-Dock.iss`;
-5. writes `Glide-Dock-v<version>-Setup.exe` to
-   `%LOCALAPPDATA%\Glide-Dock\installer`.
+GitHub Actions runs this full build on pushes and pull requests. Pushing a tag
+whose name matches the Cargo workspace version (for example `v0.4.1`) publishes
+the Setup executable and its SHA-256 file as a GitHub Release after all Windows
+checks pass.
 
-If Inno Setup is missing, the script tries:
+The setup application is authored in `setup-app` and uses the Glide-Dock logo,
+application icon, and Dock preview. It supports current-user and all-user
+installation, custom install paths, an optional desktop shortcut, and a first-run
+page for theme, startup, and available recommended apps. Machine-level file and
+registry operations run in an elevated worker; user profile configuration stays
+with the interactive user.
 
-```powershell
-winget install --id JRSoftware.InnoSetup --exact --silent
-```
+When a prior Inno Setup installation is detected, Setup offers in-place upgrade
+or cancel. `--update` performs the registered in-place update without installation
+choices or first-run setup. Parallel installs are not supported. The custom
+uninstaller removes program files, shortcuts, and Glide-Dock startup entries but
+preserves `%APPDATA%\Glide-Dock`.
 
-You can also set `GLIDE_DOCK_ISCC` to an existing `ISCC.exe`.
-
-## What the installer does
-
-- installs to `%ProgramFiles%\Glide-Dock`;
-- uses the FullColor Glide-Dock brand icon for Setup, shortcuts and the dock EXE;
-- creates one Start Menu shortcut for the Dock (settings is opened from the
-  Dock right-click → 设置... menu, not as a separate Start Menu entry) and an
-  optional desktop shortcut;
-- includes the dock, the self-contained settings app, docs and icon assets;
-- does not enable autostart automatically; configure it in
-  Settings → Behavior;
-- on uninstall, stops the dock, its hidden guard, and settings processes and removes both
-  the `Glide-Dock` scheduled task and the `HKCU\...\Run\Glide-Dock` value;
-- preserves `%APPDATA%\Glide-Dock` (configuration and preferences).
-
-The setup executable is currently unsigned, so Windows SmartScreen may show a
-warning. This is expected for a locally built installer.
+The generated installer is not code signed. Windows SmartScreen may warn about
+locally built releases.

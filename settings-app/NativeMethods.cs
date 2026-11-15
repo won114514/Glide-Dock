@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Buffers.Binary;
 
 namespace GlideDock.Settings;
 
@@ -6,6 +7,9 @@ internal static class NativeMethods
 {
     public const int WM_COPYDATA = 0x004A;
     private const ulong SettingsMagic = 0x474C4944; // "GLID"
+    private const uint SettingsProtocolVersion = 1;
+    private const int SettingsHeaderSize = 8;
+    private const int MaxPayloadSize = 256 * 1024;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct COPYDATASTRUCT
@@ -61,18 +65,24 @@ internal static class NativeMethods
 
     public static bool SendConfig(IntPtr owner, IntPtr sender, byte[] payload)
     {
-        if (owner == IntPtr.Zero || sender == IntPtr.Zero || payload.Length == 0)
+        if (owner == IntPtr.Zero || sender == IntPtr.Zero
+            || payload.Length == 0 || payload.Length > MaxPayloadSize)
         {
             return false;
         }
 
-        var handle = GCHandle.Alloc(payload, GCHandleType.Pinned);
+        var packet = new byte[SettingsHeaderSize + payload.Length];
+        BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(0, 4), SettingsProtocolVersion);
+        BinaryPrimitives.WriteUInt32LittleEndian(packet.AsSpan(4, 4), (uint)payload.Length);
+        payload.AsSpan().CopyTo(packet.AsSpan(SettingsHeaderSize));
+
+        var handle = GCHandle.Alloc(packet, GCHandleType.Pinned);
         try
         {
             var data = new COPYDATASTRUCT
             {
                 dwData = (IntPtr)SettingsMagic,
-                cbData = payload.Length,
+                cbData = packet.Length,
                 lpData = handle.AddrOfPinnedObject()
             };
             // wParam identifies the sending window; the dock uses it to verify

@@ -17,6 +17,12 @@ the following Microsoft components:
 The self-contained settings publish includes the .NET 8 runtime, licensed under the
 MIT License. See https://github.com/dotnet/runtime/blob/main/LICENSE.TXT.
 
+## Noto Sans SC
+
+`Assets/Fonts/NotoSansSC-VF.ttf` is Noto Sans SC, distributed under the SIL Open Font
+License 1.1. The full license is included at `licenses/OFL-1.1.txt`. The font is bundled
+as an application asset and is not installed into the Windows system font directory.
+
 ## Other dependencies
 
 The Windows App SDK package includes Microsoft WebView2 and Windows SDK runtime

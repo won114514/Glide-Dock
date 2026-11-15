@@ -6,6 +6,9 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $project = Join-Path $root 'settings-app\GlideDock.Settings.csproj'
 $output = Join-Path $root 'settings-app\publish'
+$versionLine = Select-String -Path (Join-Path $root 'Cargo.toml') -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+if (-not $versionLine) { throw 'Cannot read the workspace version from Cargo.toml' }
+$version = $versionLine.Matches[0].Groups[1].Value
 
 $localDotnet = Join-Path $root '.dotnet\dotnet.exe'
 if (Test-Path $localDotnet) {
@@ -43,6 +46,8 @@ if (Test-Path $output) {
     --self-contained true `
     -p:Platform=x64 `
     -p:WindowsAppSDKSelfContained=true `
+    -p:Version=$version `
+    -p:InformationalVersion=$version `
     -o $output
 
 if ($LASTEXITCODE -ne 0) {

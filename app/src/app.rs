@@ -2,10 +2,8 @@
 
 use std::collections::BTreeSet;
 use std::ffi::c_void;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use dock_core::events::DockCommand;
 use dock_core::geometry::{Point, Rect};
@@ -18,11 +16,11 @@ use dock_platform_windows::{
     DropPayload, GlassBackdrop, IconImage, IconService, LayeredSurface, PlatformError,
     ResolveService, ResolvedEntry, StoreAppService, TrayEvent, TrayIcon, WM_APP_LAUNCH_RESULT,
     WM_APP_STORE_APPS, WM_APP_WINDOW_EVENT, WM_ICON_READY, WM_PATHS_RESOLVED, WindowTracker,
-    accept_files, activate_window, animations_enabled, capture_mouse, create_layered_popup,
-    cursor_position, find_window_by_title, is_low_integrity, metrics_for_window, open_path,
-    open_start_menu, parse_drop, pick_store_app, place_above_desktop, place_dock,
-    prefers_light_theme, register_class, release_mouse, reveal, screen_to_client, set_bounds,
-    set_topmost, show_no_activate, visible_window_paths, windows_build,
+    accept_files, animations_enabled, capture_mouse, create_layered_popup, cursor_position,
+    is_low_integrity, metrics_for_window, open_path, open_start_menu, parse_drop, pick_store_app,
+    place_above_desktop, place_dock, prefers_light_theme, register_class, release_mouse, reveal,
+    screen_to_client, set_bounds, set_topmost, show_no_activate, visible_window_paths,
+    windows_build,
 };
 use dock_render::icons::IconMap;
 use dock_render::{
@@ -32,26 +30,26 @@ use dock_storage::{ConfigStore, LoadOutcome, StorageError};
 use tiny_skia::{FilterQuality, IntSize, Pixmap, PixmapPaint, Transform};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
-use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
     VK_ESCAPE, VK_LBUTTON, VK_RBUTTON,
 };
 use windows::Win32::UI::Shell::HDROP;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetForegroundWindow, GetSystemMetrics,
-    GetWindowThreadProcessId, HTCLIENT, HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOPMOST, KillTimer,
-    MA_NOACTIVATE, PostMessageW, PostQuitMessage, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CAPTURECHANGED, WM_CLOSE, WM_COPYDATA,
-    WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DROPFILES, WM_ERASEBKGND, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
+    DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetForegroundWindow, GetSystemMetrics, HTCLIENT,
+    HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOPMOST, KillTimer, MA_NOACTIVATE, PostQuitMessage,
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE,
+    SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    WM_CAPTURECHANGED, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_DROPFILES, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+    WM_NCHITTEST, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
 };
 
 use crate::launcher::LauncherService;
 use crate::render_loop::{FrameClock, frame_interval_ms};
 use crate::wndproc::dock_wndproc;
+mod settings;
+use settings::{SettingsHost, SettingsLaunchError};
 
 /// Mouse leave notification (defined in Win32::UI::Controls).
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -268,7 +266,7 @@ pub struct DockApp {
     glass: Option<GlassBackdrop>,
     native_glass: bool,
     glass_failed: bool,
-    settings_process: Option<Child>,
+    settings: SettingsHost,
     tray: Option<TrayIcon>,
     tray_menu: Option<TrayMenuView>,
     _window_tracker: Option<WindowTracker>,
@@ -377,7 +375,7 @@ impl DockApp {
             glass: None,
             native_glass: false,
             glass_failed: false,
-            settings_process: None,
+            settings: SettingsHost::default(),
             tray: None,
             tray_menu: None,
             _window_tracker: window_tracker,
@@ -1942,144 +1940,18 @@ impl DockApp {
             self.set_error("配置为只读，暂时无法打开设置".to_string());
             return;
         }
-
-        let mut running = false;
-        let mut stale = false;
-        if let Some(child) = self.settings_process.as_mut() {
-            match child.try_wait() {
-                Ok(Some(_)) => stale = true,
-                Ok(None) => running = true,
-                Err(error) => {
-                    tracing::warn!(%error, "failed to query settings process");
-                    stale = true;
+        if let Err(error) = self.settings.open(self.hwnd, self.store.path()) {
+            match error {
+                SettingsLaunchError::NotBuilt => self.set_error(
+                    "设置组件未构建：请运行 scripts/build-settings.ps1 或把 GlideDock.Settings.exe 放到 settings 目录"
+                        .to_string(),
+                ),
+                error => {
+                    tracing::error!(%error, "failed to launch settings");
+                    self.set_error(format!("无法启动设置组件：{error}"));
                 }
             }
         }
-        if stale {
-            self.settings_process = None;
-        }
-        if running {
-            if let Some(hwnd) = find_window_by_title("Glide-Dock 设置") {
-                activate_window(hwnd);
-            }
-            return;
-        }
-
-        let Some(executable) = settings_executable() else {
-            self.set_error(
-                "设置组件未构建：请运行 scripts/build-settings.ps1 或把 GlideDock.Settings.exe 放到 settings 目录"
-                    .to_string(),
-            );
-            return;
-        };
-
-        let mut command = Command::new(&executable);
-        command
-            .arg("--owner")
-            .arg((self.hwnd.0 as isize).to_string())
-            .arg("--config")
-            .arg(absolute_config_path(self.store.path()));
-        if let Ok(path) = std::env::current_exe() {
-            command.arg("--dock-exe").arg(path);
-        }
-        if let Some(directory) = executable.parent() {
-            command.current_dir(directory);
-        }
-        command.creation_flags(0x0800_0000);
-
-        match command.spawn() {
-            Ok(child) => {
-                tracing::info!(path = %executable.display(), "settings opened");
-                self.settings_process = Some(child);
-            }
-            Err(error) => {
-                tracing::error!(%error, "failed to launch settings");
-                self.set_error(format!("无法启动设置组件：{error}"));
-            }
-        }
-    }
-
-    fn on_settings_update(&mut self, wparam: WPARAM, lparam: LPARAM) -> bool {
-        // "GLID": identifies configuration payloads sent by GlideDock.Settings.
-        const SETTINGS_MAGIC: usize = 0x474C_4944;
-        const MAX_PAYLOAD: usize = 256 * 1024;
-
-        if lparam.0 == 0 || wparam.0 == 0 || self.read_only {
-            return false;
-        }
-        // Only the settings child spawned by this dock may push appearance
-        // changes. Without this check any same-integrity process could spoof
-        // the magic value.
-        let sender = HWND(wparam.0 as *mut c_void);
-        let mut sender_pid = 0u32;
-        unsafe {
-            GetWindowThreadProcessId(sender, Some(&mut sender_pid));
-        }
-        let expected_pid = self.settings_process.as_ref().map(std::process::Child::id);
-        if sender_pid == 0 || expected_pid != Some(sender_pid) {
-            tracing::warn!(
-                sender_pid,
-                "rejected WM_COPYDATA from an unexpected process"
-            );
-            return false;
-        }
-        let data = unsafe { &*(lparam.0 as *const COPYDATASTRUCT) };
-        if data.dwData != SETTINGS_MAGIC
-            || data.cbData == 0
-            || data.cbData as usize > MAX_PAYLOAD
-            || data.lpData.is_null()
-        {
-            return false;
-        }
-        let bytes =
-            unsafe { std::slice::from_raw_parts(data.lpData.cast::<u8>(), data.cbData as usize) };
-        let Ok(mut incoming) = serde_json::from_slice::<DockConfig>(bytes) else {
-            tracing::warn!("settings sent invalid configuration");
-            return false;
-        };
-
-        incoming.normalize();
-        let previous_metrics = self.metrics;
-        let previous_offset = self.config.monitor.offset;
-        let previous_glass = self.config.appearance.frosted_glass;
-        let next_motion = if incoming.version >= dock_core::CONFIG_VERSION {
-            incoming.motion
-        } else {
-            self.config.motion.clone()
-        };
-        self.config.appearance = incoming.appearance;
-        self.config.behavior = incoming.behavior;
-        self.config.motion = next_motion;
-        self.config.monitor = incoming.monitor;
-        self.apply_motion_config();
-        self.theme = resolve_theme(self.config.appearance.theme);
-        self.palette = palette_for(&self.config, self.theme);
-        self.update_native_glass();
-        self.apply_dock_layer();
-        let next_metrics = Metrics::new(
-            &self.config.appearance,
-            &self.config.behavior,
-            &self.config.motion,
-            self.dpi_scale,
-        );
-        let offset_changed = (self.config.monitor.offset - previous_offset).abs() > f32::EPSILON;
-        let glass_changed = self.config.appearance.frosted_glass != previous_glass;
-        if glass_changed {
-            self.refresh_glass_state();
-        }
-        if next_metrics != previous_metrics || offset_changed {
-            self.relayout_window(self.window_visible);
-            self.animate();
-            self.render();
-        } else {
-            self.animate();
-            self.render();
-        }
-        // The dock is the single writer of config.json; the settings process
-        // only sends appearance/behavior/monitor changes.
-        self.mark_dirty();
-        tracing::debug!("settings configuration applied");
-        true
     }
 
     fn quit(&mut self) {
@@ -2098,7 +1970,7 @@ impl DockApp {
         self.save_now();
         self.kill_all_timers();
         release_mouse();
-        self.stop_settings();
+        self.settings.close();
         if let Some(mut tray) = self.tray.take() {
             tray.remove();
         }
@@ -2117,7 +1989,7 @@ impl DockApp {
         self.shutdown_done = true;
         self.kill_all_timers();
         release_mouse();
-        self.stop_settings();
+        self.settings.close();
         if let Some(mut tray) = self.tray.take() {
             tray.remove();
         }
@@ -2125,30 +1997,6 @@ impl DockApp {
         self.glass = None;
         self.native_glass = false;
         self.window_visible = false;
-    }
-
-    fn stop_settings(&mut self) {
-        if let Some(mut child) = self.settings_process.take() {
-            // Ask the settings window to close so it can persist its placement;
-            // fall back to termination if it does not exit promptly.
-            if let Some(hwnd) = find_window_by_title("Glide-Dock 设置") {
-                unsafe {
-                    let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
-                }
-            }
-            let deadline = Instant::now() + Duration::from_millis(350);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => return,
-                    Ok(None) if Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    _ => break,
-                }
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-        }
     }
 
     // -------------------------------------------------------------- rendering
@@ -2766,42 +2614,6 @@ fn absolute_config_path(path: &Path) -> PathBuf {
     path.canonicalize()
         .or_else(|_| std::path::absolute(path))
         .unwrap_or_else(|_| path.to_path_buf())
-}
-
-fn settings_executable() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("GLIDE_DOCK_SETTINGS_EXE") {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-
-    let mut candidates = Vec::new();
-    if let Ok(executable) = std::env::current_exe() {
-        if let Some(directory) = executable.parent() {
-            candidates.push(directory.join("GlideDock.Settings.exe"));
-            candidates.push(directory.join("settings").join("GlideDock.Settings.exe"));
-        }
-    }
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    candidates.push(
-        repository
-            .join("settings-app")
-            .join("publish")
-            .join("GlideDock.Settings.exe"),
-    );
-    candidates.push(
-        repository
-            .join("settings-app")
-            .join("bin")
-            .join("x64")
-            .join("Release")
-            .join("net8.0-windows10.0.19041.0")
-            .join("win-x64")
-            .join("GlideDock.Settings.exe"),
-    );
-
-    candidates.into_iter().find(|path| path.is_file())
 }
 
 fn compute_unresolved(config: &DockConfig) -> BTreeSet<u32> {

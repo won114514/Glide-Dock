@@ -11,6 +11,9 @@
 /settings-app/bin/
 /settings-app/obj/
 /settings-app/publish/
+/setup-app/bin/
+/setup-app/obj/
+/setup-app/publish/
 /tools/dotnet-install.ps1
 
 # OS / editor

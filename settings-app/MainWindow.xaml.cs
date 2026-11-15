@@ -39,6 +39,7 @@ public sealed partial class MainWindow : Window
 	};
 
 	private readonly SettingsDocument _doc;
+	private readonly SettingsUiPreferences _uiPreferences;
 
 	private readonly StartupManager _startup;
 
@@ -103,6 +104,7 @@ public sealed partial class MainWindow : Window
 	{
 		_owner = owner;
 		_doc = SettingsDocument.Load(configPath);
+		_uiPreferences = SettingsUiPreferences.Load(_doc.Path);
 		_startup = new StartupManager(_doc.Path);
 		InitializeComponent();
 		ConfigureSliderRanges();
@@ -119,6 +121,7 @@ public sealed partial class MainWindow : Window
 		_loading = false;
 		RootGrid.Loaded += delegate
 		{
+			ApplySettingsFont();
 			if (!_initialPageApplied)
 			{
 				_initialPageApplied = true;
@@ -163,15 +166,22 @@ public sealed partial class MainWindow : Window
 		_appWindow.Title = "Glide-Dock 设置";
 		if (_appWindow.Presenter is OverlappedPresenter overlappedPresenter)
 		{
-			overlappedPresenter.IsResizable = false;
-			overlappedPresenter.IsMaximizable = false;
+			overlappedPresenter.IsResizable = true;
+			overlappedPresenter.IsMaximizable = true;
 			overlappedPresenter.IsMinimizable = true;
 		}
 		RectInt32 workArea = DisplayArea.GetFromWindowId(windowIdFromWindow, DisplayAreaFallback.Primary).WorkArea;
 		uint dpiForWindow = NativeMethods.GetDpiForWindow(windowHandle);
 		double num = Math.Max(1.0, (double)dpiForWindow / 96.0);
-		int num2 = Math.Min((int)Math.Round(1180.0 * num), Math.Max(820, workArea.Width - 80));
-		int num3 = Math.Min((int)Math.Round(900.0 * num), Math.Max(620, workArea.Height - 80));
+		int minimumWidth = Math.Min((int)Math.Round(860.0 * num), Math.Max(320, workArea.Width - 48));
+		int minimumHeight = Math.Min((int)Math.Round(620.0 * num), Math.Max(320, workArea.Height - 48));
+		if (_appWindow.Presenter is OverlappedPresenter constrainedPresenter)
+		{
+			constrainedPresenter.PreferredMinimumWidth = minimumWidth;
+			constrainedPresenter.PreferredMinimumHeight = minimumHeight;
+		}
+		int num2 = Math.Min((int)Math.Round(1180.0 * num), Math.Max(minimumWidth, workArea.Width - 80));
+		int num3 = Math.Min((int)Math.Round(860.0 * num), Math.Max(minimumHeight, workArea.Height - 80));
 		_appWindow.Resize(new SizeInt32(num2, num3));
 		PointInt32 defaultValue = new PointInt32(workArea.X + (workArea.Width - num2) / 2, workArea.Y + (workArea.Height - num3) / 2);
 		PointInt32 valueOrDefault = LoadPlacement().GetValueOrDefault(defaultValue);
@@ -320,6 +330,7 @@ public sealed partial class MainWindow : Window
 		string theme = _doc.Theme;
 		int selectedIndex = ((theme == "light") ? 1 : ((theme == "dark") ? 2 : 0));
 		themeCombo.SelectedIndex = selectedIndex;
+		SelectCombo(FontCombo, _uiPreferences.FontId);
 		SelectCombo(LayerCombo, _doc.Layer);
 		SetSlider(IconSizeSlider, _doc.IconSize);
 		SetSlider(SpacingSlider, _doc.Spacing);
@@ -350,6 +361,7 @@ public sealed partial class MainWindow : Window
 		_lastKnownWriteUtc = ReadConfigWriteTime();
 		_loading = false;
 		UpdateMagnificationEnabled();
+		ApplySettingsFont();
 	}
 
 	private DateTime ReadConfigWriteTime()
@@ -520,6 +532,7 @@ public sealed partial class MainWindow : Window
 				AccentPanel.Children.Add(button);
 			}
 		}
+		ApplySettingsFont();
 	}
 
 	private void UpdateTitleBarColors()
@@ -927,6 +940,7 @@ public sealed partial class MainWindow : Window
 			DiagnosticsHint.Text = "请打开日志目录查看错误详情。";
 			DiagnosticsRows.Children.Clear();
 		}
+		ApplySettingsFont();
 	}
 
 	private void CopyDiagnostics_Click(object sender, RoutedEventArgs e)
@@ -990,6 +1004,56 @@ public sealed partial class MainWindow : Window
 			_doc.Theme = tag;
 			ApplyTheme();
 			OnChanged();
+		}
+	}
+
+	private void FontCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+	{
+		if (_loading || FontCombo.SelectedItem is not ComboBoxItem { Tag: string fontId })
+		{
+			return;
+		}
+
+		try
+		{
+			_uiPreferences.SetFont(fontId);
+			ApplySettingsFont();
+		}
+		catch (Exception error)
+		{
+			_loading = true;
+			SelectCombo(FontCombo, _uiPreferences.FontId);
+			_loading = false;
+			NativeMethods.MessageBox(
+				WindowNative.GetWindowHandle(this),
+				"无法保存设置窗口字体：" + error.Message,
+				"Glide-Dock 设置",
+				0x00000010);
+		}
+	}
+
+	private void ApplySettingsFont()
+	{
+		FontFamily family = _uiPreferences.FontId == SettingsUiPreferences.SystemFont
+			? new FontFamily("Segoe UI")
+			: new FontFamily("ms-appx:///Assets/Fonts/NotoSansSC-VF.ttf#Noto Sans SC");
+		ApplyFontFamily(RootGrid, family);
+	}
+
+	private static void ApplyFontFamily(DependencyObject element, FontFamily family)
+	{
+		if (element is TextBlock textBlock)
+		{
+			textBlock.FontFamily = family;
+		}
+		else if (element is Control control && element is not FontIcon)
+		{
+			control.FontFamily = family;
+		}
+
+		for (int index = 0; index < VisualTreeHelper.GetChildrenCount(element); index++)
+		{
+			ApplyFontFamily(VisualTreeHelper.GetChild(element, index), family);
 		}
 	}
 
@@ -1187,10 +1251,11 @@ public sealed partial class MainWindow : Window
 	private void BuildSearchIndex()
 	{
 		_searchIndex.Clear();
-		_searchIndex.AddRange(new SearchEntry[33]
+		_searchIndex.AddRange(new SearchEntry[34]
 		{
 			new SearchEntry("主题", "深色、浅色或跟随系统。", "general", "theme 深色 浅色 系统 模式"),
 			new SearchEntry("强调色", "蓝色、青绿、紫罗兰、暖橙、玫瑰。", "general", "accent 颜色 强调色"),
+			new SearchEntry("设置窗口字体", "在内置 Noto Sans SC 与系统字体间切换。", "general", "font 字体 noto 系统"),
 			new SearchEntry("配置文件", "打开配置文件夹或重新加载 JSON。", "general", "config json 文件 路径"),
 			new SearchEntry("恢复默认设置", "重置外观与行为，不删除条目。", "general", "reset 重置 默认"),
 			new SearchEntry("Dock 层级", "桌面同级、动态层级或置顶。", "general", "layer z-order topmost 层级 置顶 桌面"),
@@ -1271,6 +1336,7 @@ public sealed partial class MainWindow : Window
 		{
 			SearchResultsPanel.Children.Add(CreateSearchResult(item));
 		}
+		ApplySettingsFont();
 		AnimatePageTransition();
 	}
 
@@ -1293,13 +1359,13 @@ public sealed partial class MainWindow : Window
 		TextBlock item2 = new TextBlock
 		{
 			Text = entry.Title,
-			FontSize = 14.0,
+			FontSize = 16.0,
 			FontWeight = FontWeights.SemiBold
 		};
 		TextBlock item3 = new TextBlock
 		{
 			Text = entry.Description,
-			FontSize = 12.0,
+			FontSize = 14.0,
 			Foreground = new SolidColorBrush(_dark ? Color.FromArgb(byte.MaxValue, 180, 180, 190) : Color.FromArgb(byte.MaxValue, 96, 96, 106))
 		};
 		StackPanel stackPanel = new StackPanel
@@ -1319,7 +1385,7 @@ public sealed partial class MainWindow : Window
 			text = string.Empty;
 		}
 		textBlock.Text = text;
-		textBlock.FontSize = 12.0;
+		textBlock.FontSize = 14.0;
 		textBlock.Foreground = new SolidColorBrush(_dark ? Color.FromArgb(byte.MaxValue, 180, 180, 190) : Color.FromArgb(byte.MaxValue, 96, 96, 106));
 		textBlock.VerticalAlignment = VerticalAlignment.Center;
 		TextBlock textBlock2 = textBlock;

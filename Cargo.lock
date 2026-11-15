@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "dock-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -82,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "dock-platform-windows"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "dock-core",
  "thiserror",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "dock-render"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "ab_glyph",
  "dock-core",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "dock-storage"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "dock-core",
  "serde_json",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "glide-dock"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "dock-core",
  "dock-platform-windows",
