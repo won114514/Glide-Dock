@@ -1,0 +1,13 @@
+[package]
+name = "dock-storage"
+description = "Glide-Dock configuration persistence, atomic writes and migrations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dock-core.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

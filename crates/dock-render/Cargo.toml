@@ -1,0 +1,13 @@
+[package]
+name = "dock-render"
+description = "Glide-Dock CPU renderer built on tiny-skia"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dock-core.workspace = true
+tiny-skia.workspace = true
+ab_glyph.workspace = true
+tracing.workspace = true

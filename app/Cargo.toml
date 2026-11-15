@@ -1,0 +1,26 @@
+[package]
+name = "glide-dock"
+description = "Glide-Dock desktop dock for Windows 10/11"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "glide-dock"
+path = "src/main.rs"
+
+[dependencies]
+dock-core.workspace = true
+dock-render.workspace = true
+dock-storage.workspace = true
+dock-platform-windows.workspace = true
+windows.workspace = true
+tiny-skia.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+
+[build-dependencies]
+winres = "0.1"

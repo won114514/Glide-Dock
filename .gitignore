@@ -1,0 +1,30 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# .NET / WinUI build locals
+/.dotnet/
+/.dotnet-home/
+/.nuget/
+/.appdata/
+/.localappdata/
+/settings-app/bin/
+/settings-app/obj/
+/settings-app/publish/
+/tools/dotnet-install.ps1
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/
+
+# Local runtime artifacts
+preview/demo-config.json
+settings-window.txt
+preview/*.txt
+preview/app-*.txt
+preview/live-*.png
+preview/selftest.png
+*.log
+dist/

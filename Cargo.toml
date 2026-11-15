@@ -1,0 +1,68 @@
+[workspace]
+resolver = "3"
+members = [
+    "app",
+    "crates/dock-core",
+    "crates/dock-render",
+    "crates/dock-storage",
+    "crates/dock-platform-windows",
+]
+
+[workspace.package]
+version = "0.4.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Glide-Dock contributors"]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+dock-core = { path = "crates/dock-core" }
+dock-render = { path = "crates/dock-render" }
+dock-storage = { path = "crates/dock-storage" }
+dock-platform-windows = { path = "crates/dock-platform-windows" }
+
+windows-numerics = "0.3.1"
+windows = { version = "0.62.2", features = [    "Win32_Foundation",
+    "UI_Composition",
+    "UI_Composition_Desktop",
+    "Foundation_Numerics",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Composition",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Wdk_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Environment",
+    "Win32_System_Registry",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+] }
+tiny-skia = "0.12.0"
+ab_glyph = "0.2.32"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev]
+opt-level = 1

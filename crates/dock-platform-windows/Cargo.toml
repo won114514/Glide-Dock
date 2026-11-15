@@ -1,0 +1,14 @@
+[package]
+name = "dock-platform-windows"
+description = "Glide-Dock Win32 / COM platform layer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dock-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+windows.workspace = true
+windows-numerics.workspace = true
