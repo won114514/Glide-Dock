@@ -1,0 +1,38 @@
+name: Republish CNB version files
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published GitHub version tag
+        required: true
+        type: string
+        default: v0.4.2
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cnb-republish-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Test publishing behavior
+        run: node --test scripts/tests/publish-cnb.test.mjs scripts/tests/mirror-github-release.test.mjs
+      - name: Verify GitHub installer and publish on CNB
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CNB_REPOSITORY: ${{ vars.CNB_REPOSITORY || 'won114514/Glide-Dock' }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: node scripts/mirror-github-release.mjs --tag "$RELEASE_TAG"

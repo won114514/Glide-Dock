@@ -61,6 +61,9 @@ node scripts/publish-cnb.mjs --tag v0.4.2 --assets dist/installer --publication 
 
 ## 从 GitHub 已发布版本恢复 CNB 下载
 
+GitHub Actions 中选择 **Republish CNB version files → Run workflow**，填写版本标签即可。
+该任务运行发布测试，并从正式 GitHub Release 下载和验证文件，不重新编译，也不移动版本标签。
+
 ```powershell
 $env:CNB_REPOSITORY = 'won114514/Glide-Dock'
 node scripts/mirror-github-release.mjs --tag v0.4.2
