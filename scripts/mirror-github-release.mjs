@@ -14,9 +14,10 @@ const pause = milliseconds => new Promise(resolve => setTimeout(resolve, millise
 export async function mirrorGithubRelease({
   tag, repository, githubRepository = 'won114514/Glide-Dock', token, githubToken, cwd = process.cwd(),
   fetchImpl = fetch, runGit = args => git(args, cwd), publish = publishCnb,
-  sleep = pause, attempts = 40, log = console.log, temporaryRoot = os.tmpdir(),
+  sleep = pause, attempts = 40, log = console.log, temporaryRoot = os.tmpdir(), publication = 'auto',
 }) {
   if (!token) throw new Error('CNB_TOKEN is required to mirror release files.');
+  if (!['auto', 'release', 'commit'].includes(publication)) throw new Error('CNB publication must be auto, release, or commit.');
   if (!/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+$/.test(repository ?? '')) throw new Error('Invalid CNB repository.');
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(githubRepository)) throw new Error('Invalid GitHub repository.');
   if (!/^v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(tag ?? '')) throw new Error('Invalid version tag.');
@@ -79,11 +80,11 @@ export async function mirrorGithubRelease({
   runGit(['worktree', 'add', '--detach', sourceDirectory, commit]);
   log('Verified GitHub installer SHA-256: ' + hash(files.get(executableName)));
   // The tag is already in CNB. Do not move main backward when mirroring an older release.
-  return publish({ repository, tag, token, cwd: sourceDirectory, assetsDirectory, syncSource: false, fetchImpl, log });
+  return publish({ repository, tag, token, cwd: sourceDirectory, assetsDirectory, syncSource: false, publication, fetchImpl, log });
 }
 
 async function main() {
-  const { values } = parseArgs({ options: { tag: { type: 'string' } } });
+  const { values } = parseArgs({ options: { tag: { type: 'string' }, publication: { type: 'string', default: 'auto' } } });
   let tag = values.tag;
   if (!tag && process.env.CNB_IS_TAG === 'true') tag = process.env.CNB_BRANCH;
   if (!tag) {
@@ -94,7 +95,7 @@ async function main() {
   }
   await mirrorGithubRelease({ tag, repository: process.env.CNB_REPO_SLUG ?? process.env.CNB_REPOSITORY,
     githubRepository: process.env.GITHUB_REPOSITORY ?? 'won114514/Glide-Dock', token: process.env.CNB_TOKEN,
-    githubToken: process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN });
+    githubToken: process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN, publication: values.publication });
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try { await main(); }

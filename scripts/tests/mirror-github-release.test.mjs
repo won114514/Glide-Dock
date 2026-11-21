@@ -53,7 +53,7 @@ async function fixture(t, options = {}) {
     return '';
   };
   const config = { tag, repository, githubRepository: repository, token, githubToken: options.githubToken, cwd: directory, temporaryRoot: directory,
-    fetchImpl, runGit, attempts: 2, sleep: async ms => pauses.push(ms), log() {},
+    publication: options.publication, fetchImpl, runGit, attempts: 2, sleep: async ms => pauses.push(ms), log() {},
     publish: async value => { publication = value; return { tag, commit }; } };
   return { config, calls, gitCalls, pauses, files, getPublication: () => publication };
 }
@@ -84,6 +84,19 @@ test('authenticates GitHub API lookups without forwarding either credential to p
   assert.ok(downloads.every(call => call.headers === undefined));
   assert.equal(f.getPublication().githubToken, undefined);
   assert.equal(f.getPublication().token, token);
+});
+
+test('preserves explicit Release publication for the native CNB temporary credential', async t => {
+  const f = await fixture(t, { publication: 'release' });
+  await mirrorGithubRelease(f.config);
+  assert.equal(f.getPublication().publication, 'release');
+});
+
+test('rejects invalid publication modes before network or Git side effects', async t => {
+  const f = await fixture(t, { publication: 'invalid' });
+  await assert.rejects(mirrorGithubRelease(f.config), /publication must be/);
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.gitCalls.length, 0);
 });
 
 test('waits for GitHub publication without forwarding CNB credentials', async t => {

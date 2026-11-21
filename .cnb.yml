@@ -1,0 +1,35 @@
+main:
+  push:
+    - name: release-support
+      docker:
+        image: node:24-bookworm
+      lock:
+        key: glide-release-mirror
+        expires: 1800
+        wait: true
+        timeout: 1800
+      stages:
+        - name: Test release publishing
+          script: node --test scripts/tests/publish-cnb.test.mjs scripts/tests/mirror-github-release.test.mjs
+        - name: Mirror a requested release
+          timeout: 30m
+          script: |
+            case "$CNB_COMMIT_MESSAGE_TITLE" in
+              *"[release-mirror]"*) node scripts/mirror-github-release.mjs --publication release ;;
+              *) echo "Version tags automatically mirror published GitHub installers." ;;
+            esac
+
+$:
+  tag_push:
+    - name: mirror-github-release
+      docker:
+        image: node:24-bookworm
+      lock:
+        key: glide-release-mirror
+        expires: 1800
+        wait: true
+        timeout: 1800
+      stages:
+        - name: Verify and publish GitHub installer on CNB
+          timeout: 30m
+          script: node scripts/mirror-github-release.mjs --publication release

@@ -179,7 +179,7 @@ Start 的 AppsFolder，只列出带 AUMID 的打包应用，选择后写入 Dock
 [CNB Releases](https://cnb.cool/won114514/Glide-Dock/-/releases)。两端使用同一次 Windows 构建生成的安装包与 SHA-256 校验文件。
 
 推送与 `Cargo.toml` 版本一致的 `v*` 标签后，CI 先运行 Rust、安装界面和发布脚本检查，再构建发布产物。
-GitHub 发布安装包后，同步主分支与版本标签到 CNB，并上传同一份安装包和校验文件。CNB 默认发布到正式 Release 页面；使用缺少 Release 权限的凭据时，自动改用版本提交的永久附件分发。
+GitHub 发布安装包后，同步主分支与版本标签到 CNB。CNB 原生流水线使用平台临时令牌，核验并上传同一份安装包和校验文件到正式 Release 页面。
 配置、权限和失败重试见 [双平台发布说明](docs/RELEASING.md)。
 
 ### Dock 层级
