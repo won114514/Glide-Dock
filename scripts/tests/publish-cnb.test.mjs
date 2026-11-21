@@ -141,3 +141,11 @@ test('missing token and malformed target fail without side effects', async t => 
   await assert.rejects(publishCnb({ ...f.config, repository: 'https://wrong.example/repo' }), /organization\/repository/);
   assert.equal(f.calls.length, 0); assert.equal(f.gitCalls.length, 0);
 });
+
+test('native CNB publication keeps the already synchronized main branch intact', async t => {
+  const f = await fixture(t);
+  await publishCnb({ ...f.config, syncSource: false });
+  assert.equal(f.gitCalls.some(args => args[0] === 'push'), false);
+  assert.equal(f.getRelease().draft, false);
+  assert.equal(f.getRelease().assets.length, 2);
+});

@@ -20,7 +20,7 @@ function git(args, token, cwd) {
 
 export async function publishCnb({
   repository, tag, assetsDirectory, notesFile, token, branch = 'main', cwd = process.cwd(),
-  fetchImpl = fetch, runGit = args => git(args, token, cwd), log = console.log,
+  fetchImpl = fetch, runGit = args => git(args, token, cwd), log = console.log, syncSource = true,
 }) {
   if (!token) throw new Error('CNB_TOKEN is required; configure it as a repository Actions secret.');
   if (!/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+$/.test(repository ?? '')) throw new Error('CNB repository must be an organization/repository path.');
@@ -69,9 +69,11 @@ export async function publishCnb({
   await request(repoPath);
   const releaseByTag = repoPath + '/-/releases/tags/' + encodeURIComponent(tag);
   let release = await request(releaseByTag, { allowMissing: true });
-  log('Synchronizing ' + branch + ' and ' + tag + ' to CNB...');
-  runGit(['push', '--atomic', 'https://cnb.cool/' + repository + '.git',
-    'HEAD:refs/heads/' + branch, 'refs/tags/' + tag + ':refs/tags/' + tag]);
+  if (syncSource) {
+    log('Synchronizing ' + branch + ' and ' + tag + ' to CNB...');
+    runGit(['push', '--atomic', 'https://cnb.cool/' + repository + '.git',
+      'HEAD:refs/heads/' + branch, 'refs/tags/' + tag + ':refs/tags/' + tag]);
+  }
   if (!release) {
     release = await request(repoPath + '/-/releases', { method: 'POST', body: {
       tag_name: tag, target_commitish: commit, name: 'Glide-Dock ' + tag, body: notes,
