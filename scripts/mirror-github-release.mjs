@@ -12,7 +12,7 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const pause = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
 export async function mirrorGithubRelease({
-  tag, repository, githubRepository = 'won114514/Glide-Dock', token, cwd = process.cwd(),
+  tag, repository, githubRepository = 'won114514/Glide-Dock', token, githubToken, cwd = process.cwd(),
   fetchImpl = fetch, runGit = args => git(args, cwd), publish = publishCnb,
   sleep = pause, attempts = 40, log = console.log, temporaryRoot = os.tmpdir(),
 }) {
@@ -22,7 +22,8 @@ export async function mirrorGithubRelease({
   if (!/^v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(tag ?? '')) throw new Error('Invalid version tag.');
   async function request(route, allowMissing = false) {
     const response = await fetchImpl('https://api.github.com/repos/' + githubRepository + route, {
-      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Glide-Dock-CNB-release-mirror' },
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Glide-Dock-CNB-release-mirror',
+        ...(githubToken ? { Authorization: 'Bearer ' + githubToken } : {}), },
       redirect: 'error', signal: AbortSignal.timeout(30000),
     });
     if (allowMissing && response.status === 404) return null;
@@ -61,7 +62,7 @@ export async function mirrorGithubRelease({
     if (url.origin !== 'https://github.com' || url.pathname !== '/' + githubRepository + '/releases/download/' + tag + '/' + name) {
       throw new Error('GitHub returned an unexpected installer download URL.');
     }
-    // GitHub downloads may redirect to its signed asset storage. No CNB credential is sent.
+    // Public downloads may redirect to signed storage. Send neither GitHub nor CNB credentials.
     const response = await fetchImpl(url.href, { signal: AbortSignal.timeout(180000) });
     if (!response.ok) throw new Error('Installer download failed (HTTP ' + response.status + '): ' + name);
     const bytes = Buffer.from(await response.arrayBuffer());
@@ -92,13 +93,17 @@ async function main() {
     tag = 'v' + version;
   }
   await mirrorGithubRelease({ tag, repository: process.env.CNB_REPO_SLUG ?? process.env.CNB_REPOSITORY,
-    githubRepository: process.env.GITHUB_REPOSITORY ?? 'won114514/Glide-Dock', token: process.env.CNB_TOKEN });
+    githubRepository: process.env.GITHUB_REPOSITORY ?? 'won114514/Glide-Dock', token: process.env.CNB_TOKEN,
+    githubToken: process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN });
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try { await main(); }
   catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(process.env.CNB_TOKEN ? message.replaceAll(process.env.CNB_TOKEN, '[redacted]') : message);
+    let message = error instanceof Error ? error.message : String(error);
+    for (const credential of [process.env.CNB_TOKEN, process.env.GITHUB_TOKEN, process.env.GH_TOKEN]) {
+      if (credential) message = message.replaceAll(credential, '[redacted]');
+    }
+    console.error(message);
     process.exitCode = 1;
   }
 }

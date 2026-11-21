@@ -9,14 +9,14 @@ GitHub 仓库的 Actions 配置中设置：
 
 | 类型 | 名称 | 内容 |
 | --- | --- | --- |
-| Secret | CNB_TOKEN | 能向目标 CNB 仓库推送代码的 Git 客户端凭据 |
+| Secret | CNB_TOKEN | 具备目标仓库 repo-code:rw 与 repo-release:rw 权限的令牌 |
 | Variable | CNB_REPOSITORY | won114514/Glide-Dock |
 
-CNB Git HTTPS 用户名为 cnb。当前“Git 客户端凭据”可以推送代码和上传提交附件，但不具备 repo-release:rw 权限。
+CNB Git HTTPS 用户名为 cnb。正式 Release 发布需要 repo-release:rw 权限；同步代码和版本标签需要 repo-code:rw 权限。
 发布脚本默认使用 auto 模式：有 Release 权限时发布正式 Release；缺少该权限时，将同一份安装包与校验文件作为版本对应提交的永久附件发布。
 日志会明确显示发布类型和入口；其他权限、网络或上传错误不会静默切换发布方式。
 
-如果必须使用独立的 CNB Release 页面，再为令牌增加目标仓库的 repo-release:rw 权限即可。
+如果使用仅支持代码和提交附件的 Git 客户端凭据，可为令牌增加目标仓库的 repo-release:rw 权限，以启用正式 Release。
 不需要读取账户资料、列举全部仓库，也不依赖 CNB 云原生构建的触发权限。
 令牌通过环境变量传入，不放在 Git 远端地址、源文件或命令行参数中。
 
@@ -63,11 +63,14 @@ node scripts/publish-cnb.mjs --tag v0.4.2 --assets dist/installer --publication 
 
 GitHub Actions 中选择 **Republish CNB version files → Run workflow**，填写版本标签即可。
 该任务运行发布测试，并从正式 GitHub Release 下载和验证文件，不重新编译，也不移动版本标签。
+工作流使用自带的 GITHUB_TOKEN 查询 GitHub API，避免匿名请求额度耗尽；两个平台的令牌均不会发送到公开下载或对象存储地址。
 
 ```powershell
 $env:CNB_REPOSITORY = 'won114514/Glide-Dock'
 node scripts/mirror-github-release.mjs --tag v0.4.2
 ```
+
+本地重试可通过 GITHUB_TOKEN 或 GH_TOKEN 环境变量提供 GitHub 认证；未设置时使用匿名 API 额度。
 
 镜像脚本核对 GitHub 与 CNB 的标签提交、附件大小、GitHub 摘要及 SHA-256 文件，
 然后在独立 Git worktree 中读取该标签的发布说明；不会将 main 回退到旧提交。

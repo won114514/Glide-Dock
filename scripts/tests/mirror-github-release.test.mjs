@@ -30,7 +30,9 @@ async function fixture(t, options = {}) {
   const fetchImpl = async (input, init = {}) => {
     const url = new URL(input);
     calls.push({ url, ...init });
-    assert.equal(init.headers?.Authorization, undefined, 'CNB credentials must never reach GitHub or download hosts');
+    const expectedAuthorization = url.hostname === 'api.github.com' && options.githubToken
+      ? 'Bearer ' + options.githubToken : undefined;
+    assert.equal(init.headers?.Authorization, expectedAuthorization, 'Only the GitHub API receives its own credential');
     if (url.hostname === 'github.com') {
       const bytes = files.get(url.pathname.split('/').at(-1));
       assert.ok(bytes); return new Response(bytes);
@@ -50,7 +52,7 @@ async function fixture(t, options = {}) {
     if (args[0] === 'rev-parse') return options.differentCommit ? 'c'.repeat(40) : commit;
     return '';
   };
-  const config = { tag, repository, githubRepository: repository, token, cwd: directory, temporaryRoot: directory,
+  const config = { tag, repository, githubRepository: repository, token, githubToken: options.githubToken, cwd: directory, temporaryRoot: directory,
     fetchImpl, runGit, attempts: 2, sleep: async ms => pauses.push(ms), log() {},
     publish: async value => { publication = value; return { tag, commit }; } };
   return { config, calls, gitCalls, pauses, files, getPublication: () => publication };
@@ -68,6 +70,20 @@ test('mirrors verified GitHub bytes using the matching CNB tag and provided cred
   assert.deepEqual(f.gitCalls.at(-1).slice(0, 3), ['worktree', 'add', '--detach']);
   assert.equal(f.gitCalls.at(-1).at(-1), commit);
   for (const [name, bytes] of f.files) assert.deepEqual(await readFile(path.join(publication.assetsDirectory, name)), bytes);
+});
+
+test('authenticates GitHub API lookups without forwarding either credential to public downloads', async t => {
+  const githubToken = 'temporary-github-workflow-token';
+  const f = await fixture(t, { githubToken });
+  await mirrorGithubRelease(f.config);
+  const apiCalls = f.calls.filter(call => call.url.hostname === 'api.github.com');
+  assert.equal(apiCalls.length, 3);
+  assert.ok(apiCalls.every(call => call.headers.Authorization === 'Bearer ' + githubToken));
+  const downloads = f.calls.filter(call => call.url.hostname === 'github.com');
+  assert.equal(downloads.length, 2);
+  assert.ok(downloads.every(call => call.headers === undefined));
+  assert.equal(f.getPublication().githubToken, undefined);
+  assert.equal(f.getPublication().token, token);
 });
 
 test('waits for GitHub publication without forwarding CNB credentials', async t => {
