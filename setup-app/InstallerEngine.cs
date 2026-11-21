@@ -40,6 +40,69 @@ internal static class InstallerEngine
         }
     }
 
+    public static IReadOnlyList<EnvironmentCheck> CheckEnvironment(string installDirectory)
+    {
+        var checks = new List<EnvironmentCheck>();
+        var supportedArchitecture = RuntimeInformation.OSArchitecture == Architecture.X64;
+        var supportedWindows = OperatingSystem.IsWindowsVersionAtLeast(10, 0, 17763);
+        checks.Add(new EnvironmentCheck(
+            "系统兼容性",
+            supportedArchitecture && supportedWindows
+                ? "Windows 10 1809 或更高版本，64 位系统。"
+                : "需要 Windows 10 1809 或更高版本的 64 位系统。",
+            supportedArchitecture && supportedWindows ? CheckState.Passed : CheckState.Failed));
+
+        try
+        {
+            var payload = InspectPayload();
+            checks.Add(new EnvironmentCheck(
+                "安装包完整性",
+                $"程序文件可读取，共 {payload.FileCount} 个文件。",
+                CheckState.Passed));
+
+            try
+            {
+                var available = GetAvailableSpace(installDirectory);
+                var required = RequiredInstallSpace(payload.UncompressedBytes);
+                var enough = available >= required;
+                checks.Add(new EnvironmentCheck(
+                    "默认位置空间",
+                    $"可用 {FormatBytes(available)}，建议至少 {FormatBytes(required)}。" +
+                    (enough ? string.Empty : " 可在安装选项中更换磁盘。"),
+                    enough ? CheckState.Passed : CheckState.Warning));
+            }
+            catch (Exception error)
+            {
+                checks.Add(new EnvironmentCheck(
+                    "默认位置空间",
+                    "无法读取目标磁盘空间；选择安装位置时会再次检查。" + error.Message,
+                    CheckState.Warning));
+            }
+        }
+        catch (Exception error)
+        {
+            checks.Add(new EnvironmentCheck("安装包完整性", error.Message, CheckState.Failed));
+            checks.Add(new EnvironmentCheck(
+                "默认位置空间",
+                "安装包无法读取，暂时无法计算所需空间。",
+                CheckState.Warning));
+        }
+
+        return checks;
+    }
+
+    public static void ValidateInstallCapacity(string installDirectory)
+    {
+        var payload = InspectPayload();
+        var required = RequiredInstallSpace(payload.UncompressedBytes);
+        var available = GetAvailableSpace(installDirectory);
+        if (available < required)
+        {
+            throw new IOException(
+                $"所选磁盘空间不足。可用 {FormatBytes(available)}，建议至少 {FormatBytes(required)}。请选择其他位置。 ");
+        }
+    }
+
     public static UninstallRecord? FindInstall()
     {
         var machine = ReadInstallRecord(RegistryHive.LocalMachine, InstallScope.AllUsers)
@@ -90,9 +153,12 @@ internal static class InstallerEngine
         InstallOptions options,
         string setupExecutable,
         bool machineScope,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<InstallProgress>? progress = null)
     {
-        await Task.Run(() => InstallCore(options, setupExecutable, machineScope, cancellationToken), cancellationToken);
+        await Task.Run(
+            () => InstallCore(options, setupExecutable, machineScope, cancellationToken, progress),
+            cancellationToken);
     }
 
     public static bool IsDockRunning() => Process.GetProcessesByName("glide-dock").Length > 0;
@@ -178,12 +244,15 @@ internal static class InstallerEngine
         InstallOptions options,
         string setupExecutable,
         bool machineScope,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<InstallProgress>? progress)
     {
+        Report(progress, 1, "正在验证安装位置...");
         ValidateInstallDirectory(options.InstallDirectory, options.IsUpdate);
         var installDirectory = Path.GetFullPath(options.InstallDirectory);
         var parentDirectory = Path.GetDirectoryName(installDirectory)
             ?? throw new InvalidDataException("安装目录无效。");
+        Report(progress, 3, "正在准备临时安装目录...");
         Directory.CreateDirectory(parentDirectory);
 
         var token = Guid.NewGuid().ToString("N");
@@ -199,10 +268,12 @@ internal static class InstallerEngine
             try
             {
                 Directory.CreateDirectory(stagingDirectory);
-                ExtractPayload(stagingDirectory);
+                ExtractPayload(stagingDirectory, progress);
                 cancellationToken.ThrowIfCancellationRequested();
+                Report(progress, 82, "正在关闭 Glide-Dock...");
                 StopProductProcesses();
 
+                Report(progress, 87, "正在切换程序文件...");
                 if (Directory.Exists(installDirectory))
                 {
                     Directory.Move(installDirectory, backupDirectory);
@@ -211,8 +282,10 @@ internal static class InstallerEngine
 
                 Directory.Move(stagingDirectory, installDirectory);
                 newMoved = true;
+                Report(progress, 93, "正在复制安装程序并创建快捷方式...");
                 File.Copy(setupExecutable, Path.Combine(installDirectory, SetupExecutable), overwrite: true);
                 CreateShortcuts(options, installDirectory, machineScope);
+                Report(progress, 97, "正在写入安装信息...");
                 WriteInstallRegistration(options, installDirectory, machineScope);
             }
             catch
@@ -241,6 +314,7 @@ internal static class InstallerEngine
                     // The committed installation is valid; leave a backup if cleanup is blocked.
                 }
             }
+            Report(progress, 100, "安装完成。");
         }
         finally
         {
@@ -251,13 +325,92 @@ internal static class InstallerEngine
         }
     }
 
-    private static void ExtractPayload(string destination)
+    private static void ExtractPayload(string destination, IProgress<InstallProgress>? progress)
     {
         using var archiveStream = Assembly.GetExecutingAssembly().GetManifestResourceStream(PayloadResource)
             ?? throw new InvalidOperationException("安装程序未包含 Glide-Dock 程序包载荷。");
         using var archive = new ZipArchive(archiveStream, ZipArchiveMode.Read);
-        archive.ExtractToDirectory(destination, overwriteFiles: false);
+        var entries = archive.Entries;
+        var totalBytes = entries.Sum(entry => entry.Length);
+        var completedBytes = 0L;
+        var completedFiles = 0;
+        var root = Path.GetFullPath(destination).TrimEnd(Path.DirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+        var buffer = new byte[64 * 1024];
+
+        foreach (var entry in entries)
+        {
+            var relativePath = entry.FullName.Replace('/', Path.DirectorySeparatorChar)
+                .Replace('\\', Path.DirectorySeparatorChar);
+            var targetPath = Path.GetFullPath(Path.Combine(destination, relativePath));
+            if (!targetPath.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("安装包包含无效的文件路径。");
+            }
+
+            if (entry.FullName.EndsWith('/') || entry.FullName.EndsWith('\\'))
+            {
+                Directory.CreateDirectory(targetPath);
+                continue;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+            using var source = entry.Open();
+            using var destinationStream = new FileStream(
+                targetPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, buffer.Length, useAsync: false);
+            int read;
+            while ((read = source.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                destinationStream.Write(buffer, 0, read);
+                completedBytes += read;
+                var percent = totalBytes == 0
+                    ? 80
+                    : 5 + (int)(75L * completedBytes / totalBytes);
+                Report(progress, Math.Clamp(percent, 5, 80), $"正在解压程序文件（{completedFiles + 1}/{entries.Count}）...");
+            }
+            completedFiles++;
+        }
+
+        Report(progress, 80, "程序文件已释放，正在完成安装...");
     }
+
+    private static (int FileCount, long UncompressedBytes) InspectPayload()
+    {
+        using var archiveStream = Assembly.GetExecutingAssembly().GetManifestResourceStream(PayloadResource)
+            ?? throw new InvalidOperationException("安装程序未包含程序文件，请重新下载完整安装包。");
+        using var archive = new ZipArchive(archiveStream, ZipArchiveMode.Read);
+        var files = archive.Entries
+            .Where(entry => !entry.FullName.EndsWith('/') && !entry.FullName.EndsWith('\\'))
+            .ToArray();
+        var names = files.Select(entry => entry.FullName.Replace('\\', '/'))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!names.Contains("glide-dock.exe") || !names.Contains("settings/GlideDock.Settings.exe"))
+        {
+            throw new InvalidDataException("安装包缺少 Glide-Dock 主程序或设置中心，请重新下载。");
+        }
+
+        return (files.Length, files.Sum(entry => entry.Length));
+    }
+
+    private static long RequiredInstallSpace(long uncompressedBytes) =>
+        Math.Max(256L * 1024 * 1024, uncompressedBytes + 128L * 1024 * 1024);
+
+    private static long GetAvailableSpace(string directory)
+    {
+        var fullPath = Path.GetFullPath(directory);
+        var root = Path.GetPathRoot(fullPath);
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            throw new IOException("无法识别安装磁盘。");
+        }
+        return new DriveInfo(root).AvailableFreeSpace;
+    }
+
+    private static string FormatBytes(long bytes) =>
+        $"{bytes / (1024d * 1024 * 1024):0.0} GB";
+
+    private static void Report(IProgress<InstallProgress>? progress, int percent, string message) =>
+        progress?.Report(new InstallProgress(percent, message));
 
     private static string CreateConfig(InstallOptions options)
     {

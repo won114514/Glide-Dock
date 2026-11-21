@@ -1,0 +1,435 @@
+import { AboutSlint, Button, ComboBox, Palette, ScrollView, Slider, Switch } from "std-widgets.slint";
+
+// One palette is shared by the window, cards, text and standard controls.
+global SettingsStyle {
+    in-out property <bool> dark: false;
+    out property <color> canvas: dark ? #181c20 : #f5f7f9;
+    out property <color> sidebar: dark ? #20252a : #edf1f5;
+    out property <color> surface: dark ? #252b31 : #ffffff;
+    out property <color> line: dark ? #373e46 : #dfe5eb;
+    out property <color> text: dark ? #edf2f7 : #202c38;
+    out property <color> muted: dark ? #aab6c2 : #647586;
+}
+
+component SettingCard inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    in property <length> control-width: 210px;
+    in property <bool> stacked: self.width < 530px;
+    min-width: 0px;
+    preferred-height: self.stacked ? info.preferred-height + 82px : max(80px, info.preferred-height + 32px);
+    height: self.preferred-height;
+    vertical-stretch: 0;
+    background: SettingsStyle.surface;
+    border-color: SettingsStyle.line;
+    border-width: 1px;
+    border-radius: 8px;
+
+    info := VerticalLayout {
+        x: 16px;
+        y: root.stacked ? 16px : (root.height - self.height) / 2;
+        width: root.stacked ? root.width - 32px : max(0px, root.width - root.control-width - 52px);
+        height: self.preferred-height;
+        spacing: 4px;
+        Text { text: root.title; color: SettingsStyle.text; font-size: 14px; font-weight: 600; wrap: word-wrap; }
+        Text { text: root.description; color: SettingsStyle.muted; font-size: 12px; wrap: word-wrap; }
+    }
+    HorizontalLayout {
+        x: root.stacked ? 16px : root.width - root.control-width - 16px;
+        y: root.stacked ? info.y + info.height + 12px : (root.height - 34px) / 2;
+        width: root.stacked ? root.width - 32px : root.control-width;
+        height: 34px;
+        spacing: 8px;
+        alignment: end;
+        @children
+    }
+}
+
+component SliderCard inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    in property <string> value-label;
+    in property <float> minimum;
+    in property <float> maximum;
+    in property <float> step: 1;
+    in-out property <float> value;
+    in property <bool> enabled: true;
+    callback edited();
+    min-width: 0px;
+    preferred-height: content.preferred-height;
+    height: self.preferred-height;
+    vertical-stretch: 0;
+    background: SettingsStyle.surface;
+    border-color: SettingsStyle.line;
+    border-width: 1px;
+    border-radius: 8px;
+    content := VerticalLayout {
+        padding: 16px;
+        spacing: 7px;
+        HorizontalLayout {
+            spacing: 12px;
+            Text { text: root.title; color: SettingsStyle.text; font-size: 14px; font-weight: 600; horizontal-stretch: 1; wrap: word-wrap; }
+            Text { text: root.value-label; color: SettingsStyle.muted; font-size: 13px; horizontal-alignment: right; }
+        }
+        Text { text: root.description; color: SettingsStyle.muted; font-size: 12px; wrap: word-wrap; }
+        Slider {
+            height: 28px;
+            minimum: root.minimum;
+            maximum: root.maximum;
+            step: root.step;
+            value <=> root.value;
+            enabled: root.enabled;
+            changed => { root.edited(); }
+        }
+    }
+}
+
+component ContentCard inherits Rectangle {
+    min-width: 0px;
+    preferred-height: content.preferred-height;
+    height: self.preferred-height;
+    vertical-stretch: 0;
+    background: SettingsStyle.surface;
+    border-color: SettingsStyle.line;
+    border-width: 1px;
+    border-radius: 8px;
+    content := VerticalLayout { padding: 16px; spacing: 12px; @children }
+}
+
+component SectionLabel inherits Text {
+    color: SettingsStyle.muted;
+    font-size: 12px;
+    font-weight: 600;
+    height: 26px;
+    vertical-alignment: center;
+    vertical-stretch: 0;
+}
+
+component PageTitle inherits Text {
+    color: SettingsStyle.text;
+    font-size: 27px;
+    font-weight: 700;
+    wrap: word-wrap;
+}
+
+component BodyText inherits Text {
+    color: SettingsStyle.muted;
+    font-size: 12px;
+    wrap: word-wrap;
+    min-width: 0px;
+}
+
+export component SettingsWindow inherits Window {
+    title: "Glide-Dock 设置";
+    no-frame: true;
+    in property <length> available-width: 1920px;
+    in property <length> available-height: 1080px;
+    min-width: min(640px, root.available-width);
+    min-height: min(440px, root.available-height);
+    preferred-width: min(980px, root.available-width);
+    preferred-height: min(720px, root.available-height);
+    background: SettingsStyle.canvas;
+    default-font-family: root.font-id == "noto-sans-sc" ? "Noto Sans SC" : "Segoe UI";
+    default-font-size: 13px;
+    in property <bool> system-dark: false;
+    in property <string> app-version;
+    property <bool> dark-mode: root.theme == "dark" || (root.theme == "system" && root.system-dark);
+    property <bool> short-window: root.height < 600px;
+    property <bool> compact: root.width < 820px;
+    property <string> page-title: ["常规", "外观", "行为", "动画", "诊断与维护", "关于 Glide-Dock"][root.page];
+    property <string> page-description: ["管理主题、启动方式和设置窗口偏好。", "调整 Dock 的尺寸、材质与屏幕位置。", "选择适合你的启动与交互方式。", "调整悬停和启动效果，改动可直接在 Dock 上查看。", "查看运行信息，排查启动、拖放与权限问题。", "一个轻量、贴近 Windows 的桌面 Dock。"][root.page];
+
+    in-out property <int> page: 0;
+    in-out property <string> theme: "system";
+    in-out property <string> accent: "blue";
+    in-out property <string> layer: "desktop";
+    in-out property <string> font-id: "noto-sans-sc";
+    in-out property <float> icon-size: 48;
+    in-out property <float> spacing: 18;
+    in-out property <float> dock-padding: 14;
+    in-out property <float> corner-radius: 20;
+    in-out property <float> dock-opacity: 78;
+    in-out property <bool> frosted-glass: true;
+    in-out property <float> edge-margin: 10;
+    in-out property <float> monitor-offset: 0;
+    in-out property <bool> magnification: true;
+    in-out property <bool> auto-hide: false;
+    in-out property <int> auto-hide-delay: 450;
+    in-out property <bool> launch-animation: true;
+    in-out property <bool> show-tooltips: true;
+    in-out property <bool> show-running-indicator: true;
+    in-out property <bool> motion-enabled: true;
+    in-out property <bool> respect-reduced-motion: true;
+    in-out property <string> hover-preset: "glide_zoom";
+    in-out property <string> launch-preset: "glide_launch";
+    in-out property <float> max-scale: 1.35;
+    in-out property <float> range-slots: 1.7;
+    in-out property <int> hover-ms: 180;
+    in-out property <float> elasticity: 75;
+    in-out property <bool> startup-enabled: false;
+    in-out property <string> startup-mode: "task";
+    in-out property <string> status-message: "设置已连接到 Glide-Dock 主程序。";
+    in-out property <string> diagnostics: "选择“刷新诊断”以查看运行信息。";
+
+    callback settings-changed();
+    callback action(string);
+
+
+    init => { root.sync-palette(); }
+    changed dark-mode => { root.sync-palette(); }
+    changed page => { settings-scroll.content-y = 0px; }
+    function sync-palette() {
+        SettingsStyle.dark = root.dark-mode;
+        Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light;
+    }
+
+    VerticalLayout {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        spacing: 0px;
+        Rectangle {
+            height: 44px;
+            background: SettingsStyle.sidebar;
+            HorizontalLayout {
+                spacing: 0px;
+                WindowMoveArea {
+                    horizontal-stretch: 1;
+                    HorizontalLayout {
+                        padding-left: 18px;
+                        Text { text: "Glide-Dock 设置"; color: SettingsStyle.text; font-size: 12px; vertical-alignment: center; }
+                    }
+                }
+                Button { width: 46px; height: 44px; text: "—"; accessible-label: "最小化"; clicked => { root.action("window-minimize"); } }
+                Button { width: 46px; height: 44px; text: "□"; accessible-label: "最大化或还原"; clicked => { root.action("window-toggle-maximize"); } }
+                Button { width: 46px; height: 44px; text: "×"; accessible-label: "关闭设置"; clicked => { root.action("window-close"); } }
+            }
+        }
+        Rectangle { height: 1px; background: SettingsStyle.line; }
+        HorizontalLayout {
+            spacing: 0px;
+            Rectangle {
+                width: root.compact ? 178px : 212px;
+                background: SettingsStyle.sidebar;
+                VerticalLayout {
+                    padding: 14px;
+                    padding-top: root.short-window ? 16px : 24px;
+                    spacing: root.short-window ? 6px : 8px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Image { source: @image-url("../../assets/brand/02-App-Icons/FullColor/Glide-Dock-FullColor-128x128.png"); width: 28px; height: 28px; }
+                        Text { text: "Glide-Dock"; color: SettingsStyle.text; font-size: root.compact ? 16px : 19px; font-weight: 700; vertical-alignment: center; }
+                    }
+                    BodyText { text: "设置中心"; height: root.short-window ? 20px : 28px; }
+                    for label[index] in ["常规", "外观", "行为", "动画", "诊断与维护", "关于"] : Button {
+                        text: label;
+                        height: root.short-window ? 34px : 40px;
+                        primary: root.page == index;
+                        clicked => { root.page = index; }
+                    }
+                    Rectangle { vertical-stretch: 1; background: transparent; }
+                    if !root.short-window: BodyText { text: "改动自动保存并应用到 Dock"; }
+                    BodyText { text: "v" + root.app-version; }
+                }
+            }
+            Rectangle { width: 1px; background: SettingsStyle.line; }
+            VerticalLayout {
+                padding-top: root.compact ? 20px : 28px;
+                padding-left: root.compact ? 20px : 28px;
+                padding-right: root.compact ? 16px : 24px;
+                padding-bottom: 12px;
+                spacing: 6px;
+                PageTitle { text: root.page-title; }
+                BodyText { text: root.page-description; }
+                Rectangle { height: 10px; background: transparent; }
+                settings-scroll := ScrollView {
+                    vertical-stretch: 1;
+                    horizontal-scrollbar-policy: always-off;
+                    content-width: self.width;
+                    VerticalLayout {
+                        padding-right: 18px;
+                        padding-bottom: 12px;
+                        spacing: 8px;
+                        if root.page == 0: VerticalLayout {
+                            spacing: 8px;
+                            SectionLabel { text: "个性化"; }
+                            SettingCard {
+                                title: "颜色主题";
+                                description: "跟随 Windows，或固定使用浅色、深色。";
+                                ComboBox {
+                                    height: 34px;
+                                    model: ["跟随系统", "浅色", "深色"];
+                                    current-index: root.theme == "system" ? 0 : root.theme == "light" ? 1 : 2;
+                                    selected => { root.theme = ["system", "light", "dark"][self.current-index]; root.settings-changed(); }
+                                }
+                            }
+                            SettingCard {
+                                title: "设置窗口字体";
+                                description: "内置字体仅在此窗口使用，无需安装到系统。";
+                                ComboBox {
+                                    height: 34px;
+                                    model: ["内置中文字体", "Windows 系统字体"];
+                                    current-index: root.font-id == "noto-sans-sc" ? 0 : 1;
+                                    selected => { root.font-id = self.current-index == 0 ? "noto-sans-sc" : "system"; root.action("font-changed"); }
+                                }
+                            }
+                            SectionLabel { text: "启动与窗口"; }
+                            SettingCard {
+                                title: "开机自启动";
+                                description: "登录 Windows 后自动打开 Dock。";
+                                control-width: 52px;
+                                stacked: false;
+                                Switch { checked <=> root.startup-enabled; toggled => { root.action(self.checked ? "startup-enable" : "startup-disable"); } }
+                            }
+                            SettingCard {
+                                title: "启动方式";
+                                description: "计划任务启动更快；未授权时自动改用兼容方式。";
+                                ComboBox {
+                                    height: 34px;
+                                    model: ["快速（计划任务）", "兼容（注册表）"];
+                                    current-index: root.startup-mode == "task" ? 0 : 1;
+                                    selected => { root.startup-mode = self.current-index == 0 ? "task" : "run"; root.action(root.startup-enabled ? "startup-update" : "startup-mode"); }
+                                }
+                            }
+                            SettingCard {
+                                title: "Dock 层级";
+                                description: "控制 Dock 与其他窗口的前后顺序。";
+                                ComboBox {
+                                    height: 34px;
+                                    model: ["桌面同级", "交互时置顶", "始终置顶"];
+                                    current-index: root.layer == "desktop" ? 0 : root.layer == "dynamic" ? 1 : 2;
+                                    selected => { root.layer = ["desktop", "dynamic", "topmost"][self.current-index]; root.settings-changed(); }
+                                }
+                            }
+                            SectionLabel { text: "配置管理"; }
+                            ContentCard {
+                                BodyText { text: "配置由 Dock 统一保存。恢复默认会重置外观、行为和动画，保留 Dock 条目。"; }
+                                Button { text: "打开配置文件夹"; height: 34px; clicked => { root.action("open-config"); } }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Button { text: "重新加载"; height: 34px; clicked => { root.action("reload"); } }
+                                    Button { text: "恢复默认"; height: 34px; clicked => { root.action("reset"); } }
+                                }
+                            }
+                        }
+                        if root.page == 1: VerticalLayout {
+                            spacing: 8px;
+                            SectionLabel { text: "颜色与材质"; }
+                            ContentCard {
+                                Text { text: "强调色"; color: SettingsStyle.text; font-size: 14px; font-weight: 600; }
+                                BodyText { text: "用于运行状态、拖动提示和选中状态。"; }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    for label[index] in ["蓝色", "青绿", "紫罗兰", "暖橙", "玫瑰"]: Button {
+                                        text: label;
+                                        height: 34px;
+                                        min-width: 0px;
+                                        primary: root.accent == ["blue", "teal", "violet", "orange", "pink"][index];
+                                        clicked => { root.accent = ["blue", "teal", "violet", "orange", "pink"][index]; root.settings-changed(); }
+                                    }
+                                }
+                            }
+                            SettingCard {
+                                title: "毛玻璃背景";
+                                description: "使用 Windows 实时模糊；不可用时自动回退。";
+                                control-width: 52px;
+                                stacked: false;
+                                Switch { checked <=> root.frosted-glass; toggled => { root.settings-changed(); } }
+                            }
+                            SliderCard { title: "背景透明度"; description: "数值越大，Dock 背景越不透明。"; minimum: 20; maximum: 100; value <=> root.dock-opacity; value-label: round(root.dock-opacity) + " %"; edited => { root.settings-changed(); } }
+                            SectionLabel { text: "尺寸与间距"; }
+                            SliderCard { title: "图标大小"; description: "设置 Dock 中图标的基础尺寸。"; minimum: 24; maximum: 128; value <=> root.icon-size; value-label: round(root.icon-size) + " DIP"; edited => { root.settings-changed(); } }
+                            SliderCard { title: "图标间距"; description: "调整相邻图标之间的距离。"; minimum: 0; maximum: 48; value <=> root.spacing; value-label: round(root.spacing) + " DIP"; edited => { root.settings-changed(); } }
+                            SliderCard { title: "背景内边距"; description: "调整图标与 Dock 背景边缘的距离。"; minimum: 4; maximum: 48; value <=> root.dock-padding; value-label: round(root.dock-padding) + " DIP"; edited => { root.settings-changed(); } }
+                            SliderCard { title: "背景圆角"; description: "数值越大，背景边角越圆润。"; minimum: 0; maximum: 64; value <=> root.corner-radius; value-label: round(root.corner-radius) + " DIP"; edited => { root.settings-changed(); } }
+                            SectionLabel { text: "屏幕位置"; }
+                            SliderCard { title: "屏幕边缘距离"; description: "调整 Dock 与屏幕底部工作区边缘的距离。"; minimum: 0; maximum: 200; value <=> root.edge-margin; value-label: round(root.edge-margin) + " DIP"; edited => { root.settings-changed(); } }
+                            SliderCard { title: "水平位置微调"; description: "负值向左，正值向右，0 为居中。"; minimum: -500; maximum: 500; value <=> root.monitor-offset; value-label: round(root.monitor-offset) + " DIP"; edited => { root.settings-changed(); } }
+                        }
+                        if root.page == 2: VerticalLayout {
+                            spacing: 8px;
+                            SectionLabel { text: "交互反馈"; }
+                            SettingCard { title: "悬停放大"; description: "鼠标移到图标上时，平滑放大当前和邻近图标。"; control-width: 52px; stacked: false; Switch { checked <=> root.magnification; toggled => { root.settings-changed(); } } }
+                            SettingCard { title: "应用启动动画"; description: "启动应用时播放动画页中选定的效果。"; control-width: 52px; stacked: false; Switch { checked <=> root.launch-animation; toggled => { root.settings-changed(); } } }
+                            SettingCard { title: "悬停时显示名称"; description: "鼠标停在图标上时显示应用名称。"; control-width: 52px; stacked: false; Switch { checked <=> root.show-tooltips; toggled => { root.settings-changed(); } } }
+                            SettingCard { title: "显示运行状态"; description: "在正在运行的应用图标下显示状态点。"; control-width: 52px; stacked: false; Switch { checked <=> root.show-running-indicator; toggled => { root.settings-changed(); } } }
+                            ContentCard {
+                                Text { text: "自动隐藏"; color: SettingsStyle.text; font-size: 14px; font-weight: 600; }
+                                BodyText { text: "自动隐藏尚未实现，Dock 目前会持续显示。"; }
+                            }
+                        }
+                        if root.page == 3: VerticalLayout {
+                            spacing: 8px;
+                            SectionLabel { text: "动画偏好"; }
+                            SettingCard { title: "启用动效"; description: "控制 Dock 的动画效果。"; control-width: 52px; stacked: false; Switch { checked <=> root.motion-enabled; toggled => { root.settings-changed(); } } }
+                            SettingCard { title: "跟随系统减少动态效果"; description: "尊重 Windows 的辅助功能设置。"; control-width: 52px; stacked: false; Switch { checked <=> root.respect-reduced-motion; toggled => { root.settings-changed(); } } }
+                            SettingCard {
+                                title: "悬停动效"; description: "鼠标移入图标时的视觉反馈。"; control-width: 240px;
+                                ComboBox {
+                                    height: 34px;
+                                    enabled: root.motion-enabled && root.magnification;
+                                    model: ["Glide Zoom · 平滑放大", "Bounce · 轻柔弹起", "Wave · 依次传递", "Fluid Press · 按压反馈", "Glow · 柔和光晕", "Perspective · 轻微倾斜"];
+                                    current-index: root.hover-preset == "glide_zoom" ? 0 : root.hover-preset == "bounce" ? 1 : root.hover-preset == "wave" ? 2 : root.hover-preset == "fluid_press" ? 3 : root.hover-preset == "glow" ? 4 : 5;
+                                    selected => { root.hover-preset = ["glide_zoom", "bounce", "wave", "fluid_press", "glow", "perspective"][self.current-index]; root.settings-changed(); }
+                                }
+                            }
+                            SettingCard {
+                                title: "启动动效"; description: "点击应用图标后播放的动画。"; control-width: 240px;
+                                ComboBox {
+                                    height: 34px;
+                                    enabled: root.motion-enabled && root.launch-animation;
+                                    model: ["Glide Launch · 快速上浮", "Triple Bounce · 三次弹跳", "Ripple Launch · 光环扩散", "Pulse Launch · 脉冲光晕"];
+                                    current-index: root.launch-preset == "glide_launch" ? 0 : root.launch-preset == "triple_bounce" ? 1 : root.launch-preset == "ripple_launch" ? 2 : 3;
+                                    selected => { root.launch-preset = ["glide_launch", "triple_bounce", "ripple_launch", "pulse_launch"][self.current-index]; root.settings-changed(); }
+                                }
+                            }
+                            SectionLabel { text: "效果参数"; }
+                            SliderCard { title: "最大放大倍率"; description: "控制悬停图标放大的上限。"; minimum: 1.05; maximum: 3.5; step: 0.05; value <=> root.max-scale; value-label: round(root.max-scale * 100) / 100 + " ×"; enabled: root.motion-enabled && root.magnification; edited => { root.settings-changed(); } }
+                            SliderCard { title: "动画响应时间"; description: "数值越小，响应越快。"; minimum: 80; maximum: 400; step: 5; value: root.hover-ms; value-label: root.hover-ms + " ms"; enabled: root.motion-enabled; edited => { root.hover-ms = round(self.value); root.settings-changed(); } }
+                            SliderCard { title: "弹性强度"; description: "控制动画的回弹幅度。"; minimum: 0; maximum: 100; value <=> root.elasticity; value-label: round(root.elasticity) + " %"; enabled: root.motion-enabled; edited => { root.settings-changed(); } }
+                            SliderCard { title: "悬停影响范围"; description: "控制多少个相邻图标参与悬停动画。"; minimum: 0.5; maximum: 8; step: 0.1; value <=> root.range-slots; value-label: round(root.range-slots * 10) / 10 + " 个图标"; enabled: root.motion-enabled && root.magnification; edited => { root.settings-changed(); } }
+                            Button { text: "复制动画配置"; height: 34px; clicked => { root.action("copy-motion"); } }
+                        }
+                        if root.page == 4: VerticalLayout {
+                            spacing: 8px;
+                            SectionLabel { text: "维护工具"; }
+                            ContentCard {
+                                BodyText { text: "设置窗口与 Dock 同进程运行，关闭设置窗口后 Dock 会继续运行。"; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Button { text: "打开配置目录"; height: 34px; clicked => { root.action("open-config"); } }
+                                    Button { text: "打开日志目录"; height: 34px; clicked => { root.action("open-logs"); } }
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Button { text: "刷新诊断"; height: 34px; clicked => { root.action("refresh-diagnostics"); } }
+                                    Button { text: "复制诊断"; height: 34px; clicked => { root.action("copy-diagnostics"); } }
+                                }
+                            }
+                            SectionLabel { text: "诊断报告"; }
+                            ContentCard {
+                                Text { text: root.diagnostics; color: SettingsStyle.text; font-size: 12px; wrap: char-wrap; min-width: 0px; }
+                            }
+                        }
+                        if root.page == 5: VerticalLayout {
+                            spacing: 8px;
+                            ContentCard {
+                                Image { source: @image-url("../../assets/brand/02-App-Icons/FullColor/Glide-Dock-FullColor-128x128.png"); width: 56px; height: 56px; }
+                                Text { text: "Glide-Dock"; color: SettingsStyle.text; font-size: 24px; font-weight: 700; }
+                                BodyText { text: "版本 " + root.app-version; }
+                                BodyText { text: "你拖进去什么，它就有什么。拖入应用、文件或文件夹，建立适合自己的桌面启动栏。"; }
+                                BodyText { text: "设置自动保存，由 Dock 主程序统一管理。关闭设置不会退出 Dock。"; }
+                                Button { text: "打开配置文件夹"; height: 34px; clicked => { root.action("open-config"); } }
+                                BodyText { text: "开源许可：MIT OR Apache-2.0"; }
+                            }
+                            ContentCard { AboutSlint { preferred-height: 80px; } }
+                        }
+                    }
+                }
+                Rectangle { height: 1px; background: SettingsStyle.line; }
+                BodyText { text: root.status-message; height: self.preferred-height; overflow: elide; }
+            }
+        }
+    }
+}

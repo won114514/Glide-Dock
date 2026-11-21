@@ -438,10 +438,10 @@ fn launch_directory(item: &DockItem, use_shortcut: bool) -> Option<Vec<u16>> {
 
     let target = item.target_path.trim();
     let target_path = Path::new(target);
-    if target_path.is_file() {
-        if let Some(parent) = target_path.parent().filter(|parent| parent.is_dir()) {
-            return Some(wide(&parent.to_string_lossy()));
-        }
+    if target_path.is_file()
+        && let Some(parent) = target_path.parent().filter(|parent| parent.is_dir())
+    {
+        return Some(wide(&parent.to_string_lossy()));
     }
     None
 }

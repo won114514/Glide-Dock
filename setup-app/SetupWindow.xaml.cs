@@ -10,7 +10,7 @@ namespace GlideDock.Setup;
 
 internal sealed partial class SetupWindow : Window
 {
-    private enum WizardPage { Welcome, Install, FirstRun, Progress, Uninstall, UninstallProgress, Finished }
+    private enum WizardPage { Preflight, Welcome, Install, FirstRun, Progress, Uninstall, UninstallProgress, Finished }
 
     private readonly LaunchRequest _request;
     private readonly UninstallRecord? _existing;
@@ -20,7 +20,9 @@ internal sealed partial class SetupWindow : Window
     private WizardPage _page;
     private bool _busy;
     private bool _completed;
+    private bool _preflightPassed;
     private bool _hasExistingConfig;
+    private IReadOnlyList<EnvironmentCheck> _environmentChecks = Array.Empty<EnvironmentCheck>();
     private TextBox? _installPathBox;
     private ComboBox? _scopeBox;
     private StackPanel? _themeChoices;
@@ -28,6 +30,8 @@ internal sealed partial class SetupWindow : Window
     private CheckBox? _desktopCheck;
     private CheckBox? _launchCheck;
     private ProgressRing? _progressRing;
+    private ProgressBar? _progressBar;
+    private TextBlock? _progressPercentText;
     private TextBlock? _statusText;
     private TextBlock? _errorText;
 
@@ -42,7 +46,7 @@ internal sealed partial class SetupWindow : Window
         _page = request.Mode switch
         {
             LaunchMode.Uninstall or LaunchMode.UninstallWorker => WizardPage.Uninstall,
-            _ => WizardPage.Welcome
+            _ => WizardPage.Preflight
         };
 
         InitializeComponent();
@@ -91,9 +95,13 @@ internal sealed partial class SetupWindow : Window
     private async void SetupWindow_Loaded(object sender, RoutedEventArgs e)
     {
         BrandLogo.Source = await LoadImageAsync("GlideDock.Setup.Brand.Logo.png");
+        if (_request.Mode is not LaunchMode.Uninstall and not LaunchMode.UninstallWorker)
+        {
+            await RunStartupPreflightAsync();
+        }
         if (_request.Mode == LaunchMode.Update)
         {
-            await RunAutomaticUpdateAsync();
+            if (_preflightPassed) await RunAutomaticUpdateAsync();
         }
         else if (_request.Mode == LaunchMode.UninstallWorker)
         {

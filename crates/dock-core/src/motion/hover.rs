@@ -118,10 +118,10 @@ impl WaveState {
     /// When the pointer leaves, the old weights are deliberately kept so the
     /// decay still starts from the last wave shape.
     pub fn sync_weights(&mut self, anchor: Option<usize>, count: usize, range_slots: f32) {
-        if let Some(anchor) = anchor {
-            if self.anchor != Some(anchor) || self.weights.len() != count {
-                self.weights = wave_weights(anchor, count, range_slots);
-            }
+        if let Some(anchor) = anchor
+            && (self.anchor != Some(anchor) || self.weights.len() != count)
+        {
+            self.weights = wave_weights(anchor, count, range_slots);
         }
     }
 

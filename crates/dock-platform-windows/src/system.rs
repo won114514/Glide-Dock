@@ -323,10 +323,10 @@ pub fn running_executables() -> Vec<String> {
     let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
     while has_entry {
         let pid = entry.th32ProcessID;
-        if pid != 0 {
-            if let Some(path) = process_path(pid) {
-                paths.insert(path.to_ascii_lowercase());
-            }
+        if pid != 0
+            && let Some(path) = process_path(pid)
+        {
+            paths.insert(path.to_ascii_lowercase());
         }
         has_entry = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
     }

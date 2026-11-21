@@ -21,7 +21,7 @@ Glide-Dock 是一个用 **Rust + Win32** 实现的常驻桌面启动栏：首次
 
 ## 当前状态
 
-**v0.4.1 · M2 MVP 已完成，M3 部分完成，M4 设置中心与五层动效系统已落地。**
+**v0.4.2 · M2 MVP 已完成，M3 部分完成，M4 设置中心与五层动效系统已落地。**
 
 | 能力 | 状态 |
 | --- | --- |
@@ -46,7 +46,7 @@ Glide-Dock 是一个用 **Rust + Win32** 实现的常驻桌面启动栏：首次
 | 毛玻璃背景（Windows.UI.Composition 实时 HostBackdropBrush） | ✅ 已实现，不截屏；失败时使用主题半透明渐变；可用 `appearance.frosted_glass` 关闭 |
 | 深色 / 浅色 / 跟随系统主题 | ✅ 已实现 |
 | 五种强调色 | ✅ 已实现 |
-| WinUI 3 设置中心（主题/尺寸/材质/行为/动画/恢复默认） | ✅ 已实现 |
+| 设置中心（主题/尺寸/材质/行为/动画/恢复默认） | ✅ 已实现 |
 | 实时预览：设置改动即时通知 Dock | ✅ 已实现 |
 | Per-Monitor V2 DPI、任务栏工作区避让 | ✅ 已实现 |
 | 单实例运行 | ✅ 已实现 |
@@ -57,7 +57,7 @@ Glide-Dock 是一个用 **Rust + Win32** 实现的常驻桌面启动栏：首次
 | 设置中心「诊断与维护」页：拖拽、UAC、守护、启动、快捷方式 | ✅ 已实现 |
 | 自动隐藏 / 全局热键 | ⬜ 未实现 |
 | 开机自启动（计划任务 / HKCU Run 双模式） | ✅ 已实现 |
-| 应用安装包（自有品牌 WinUI 3 安装器与卸载器） | ✅ 已实现 |
+| 应用安装包（Rust + Tauri 安装器与卸载器） | ✅ 已实现 |
 | 多显示器切换记忆 | 🟡 依赖 `WM_DISPLAYCHANGE` 重排，未完整记忆 |
 | 任务切换 / 时钟/CPU 数据小组件 | ⬜ 计划 M5 |
 
@@ -73,9 +73,10 @@ Glide-Dock 是一个用 **Rust + Win32** 实现的常驻桌面启动栏：首次
 **环境**
 
 - Windows 10 1809+ / Windows 11（x64）
-- Rust 1.85+（推荐 stable，MSVC 工具链）
+- Rust stable（MSVC 工具链）
+- 运行安装器需要 Microsoft Edge WebView2 Runtime；Dock/Slint 本身不需要 .NET
 - Windows SDK 10.0.19041+
-- 构建设置中心需要 .NET 8 SDK；运行发布版不需要安装 .NET（已自包含）
+- 设置中心由 Dock 内置的 Rust + Slint UI 提供，不需要单独安装或启动设置程序
 
 > **完整性标签警告**：如果仓库位于沙箱工作区，根目录可能带有
 > `Mandatory Label\Low`。在该目录里构建/复制出的 `target\release\glide-dock.exe`
@@ -85,7 +86,7 @@ Glide-Dock 是一个用 **Rust + Win32** 实现的常驻桌面启动栏：首次
 > Medium 完整性包，或把 zip 解压到桌面再运行。
 
 ```powershell
-# 推荐：构建并打包到 %LOCALAPPDATA%\Glide-Dock\Glide-Dock-v0.4.1（Medium 完整性）
+# 推荐：构建并打包到 %LOCALAPPDATA%\Glide-Dock\Glide-Dock-v0.4.2（Medium 完整性）
 powershell -ExecutionPolicy Bypass -File scripts/package.ps1
 
 # 构建品牌安装包（单文件 Setup.exe；输出到 %LOCALAPPDATA%\Glide-Dock\installer）
@@ -97,10 +98,7 @@ cargo run -p glide-dock
 # 带内置示例条目的演示模式（写到 preview/demo-config.json，不污染真实配置）
 cargo run -p glide-dock -- --demo
 
-# 构建设置中心：publish 到 settings-app/publish（自包含 Windows App SDK）
-powershell -ExecutionPolicy Bypass -File scripts/build-settings.ps1
-
-# 打开 WinUI 3 设置中心
+# 打开 Dock 内置的设置中心
 cargo run -p glide-dock -- --settings
 
 # 无窗口自检：建窗 → 渲染一帧 → 断言全部定时器空闲 → 不读写用户配置 → 退出码 0
@@ -125,9 +123,7 @@ cargo build --release -p glide-dock
 cargo run -p glide-dock -- --config .\preview\my-config.json
 ```
 
-发布时把 `settings-app\publish` 整个文件夹放到 `glide-dock.exe` 同级的
-`settings` 目录即可；Dock 会优先读取 `GLIDE_DOCK_SETTINGS_EXE`、同级
-`GlideDock.Settings.exe`、`settings\GlideDock.Settings.exe`。
+发布时使用 `scripts\\build-installer.ps1` 生成的 Tauri 安装器；安装器会把 Rust Dock及其资源解包到目标目录。Dock/Slint 分发不再要求 .NET SDK、WinUI 发布目录或 `settings-app\\publish`。
 
 ## 交互
 
@@ -177,6 +173,15 @@ Start 的 AppsFolder，只列出带 AUMID 的打包应用，选择后写入 Dock
   可拖动排序；右键只提供移除；
 - **添加商店应用...**：后台扫描 AppsFolder 后选择。
 
+### 双平台版本发布
+
+版本发布到 [GitHub Releases](https://github.com/won114514/Glide-Dock/releases) 和
+[CNB Releases](https://cnb.cool/won114514/Glide-Dock/-/releases)。两端使用同一次 Windows 构建生成的安装包与 SHA-256 校验文件。
+
+推送与 `Cargo.toml` 版本一致的 `v*` 标签后，CI 先运行 Rust、安装界面和发布脚本检查，再构建发布产物。
+GitHub 和 CNB 分别上传同一份文件；CNB 同步主分支与该版本标签，确认两个附件完整后公开版本。
+配置、权限和失败重试见 [双平台发布说明](docs/RELEASING.md)。
+
 ### Dock 层级
 
 设置 → 常规 → **Dock 层级**：
@@ -223,17 +228,29 @@ Dock 同时启动一个隐藏的 `glide-dock.exe --guard` 守护进程：
 - 60 秒内最多重启 5 次，防止崩溃循环；
 - 安装包卸载时现有 `taskkill /IM glide-dock.exe` 会同时结束守护进程。
 
+### 设置界面与安装器
+
+当前设置入口为 Dock 进程内的 Rust + Slint 窗口，UI 位于 `app/ui/settings.slint`。
+侧栏选中态由当前页面统一决定，重复点击与来回切换不会留下旧页面的高亮。
+卡片按可用宽度调整布局，说明文字自动换行，滑块显示实时数值；
+设置窗口支持浅色、深色和跟随系统，并根据所在显示器工作区与 DPI 设置初始大小。
+
+安装器由 `installer` 目录下的 Rust + Tauri 与 Fluent UI React v9 实现，采用官方控件和 SVG 图标。
+左侧步骤导航、右侧设置内容与底部操作区分开布局，首次设置采用整行偏好设置和可展开的应用列表。窄窗口会收起步骤说明，
+内容独立滚动，底部操作区保持可见。分发包包含设置中心的内置中文字体及许可证。
+实现梳理、问题原因与验证记录见 [设置中心与安装器检查记录](docs/SETTINGS-INSTALLER-REVIEW.md)。
+
 ### 设置中心「诊断与维护」
 
-设置 → **诊断与维护** 提供完整诊断页：
+设置 → **诊断与维护** 可以查看：
 
-- Dock / 设置中心 / Explorer 的运行状态、PID、权限和完整性；
-- UAC 注册表状态（`EnableLUA`、`ConsentPromptBehaviorAdmin`、`PromptOnSecureDesktop`）；
-- 守护进程是否运行；
-- 开机启动方式与开始菜单快捷方式；
-- AppCompatFlags 兼容性标记；
-- 配置文件、Dock 路径和日志目录；
-- **刷新**、**复制诊断**、**打开日志目录**；**修复** 当前保留为禁用项，诊断页只读，不修改系统。
+- 版本、Dock 进程 ID、内存工作集与运行权限；
+- Explorer 进程 ID、守护进程和 UAC 开关状态；
+- 开机启动方式、开始菜单快捷方式与兼容性标记；
+- 程序路径、配置文件和日志目录。
+
+支持**刷新诊断**、**复制诊断**、**打开配置目录**和**打开日志目录**。
+设置窗口与 Dock 在同一进程中运行，关闭设置窗口后 Dock 继续运行。
 
 说明：管理员权限会触发 Windows UIPI，普通 Explorer 无法把文件拖进管理员进程；Low Integrity 也会限制拖放和子应用启动。
 
@@ -273,18 +290,19 @@ Dock 同时启动一个隐藏的 `glide-dock.exe --guard` 守护进程：
 
 ```
 app/                              # glide-dock.exe：CLI、消息循环、状态机、离线预览
-settings-app/                     # WinUI 3 设置中心（C#，独立进程，Windows App SDK）
+installer/                        # Rust + Tauri + Fluent UI React 安装器（glide-setup.exe）
 crates/dock-core/                 # 纯模型 / 几何 / 布局 / 五层动效引擎 / 主题（零 OS 依赖）
 crates/dock-render/               # tiny-skia + ab_glyph：Dock、菜单、提示、阴影
 crates/dock-storage/              # JSON、原子写、迁移、损坏备份
 crates/dock-platform-windows/     # 分层窗口、DIB、Shell、图标线程、拖放、DPI
 preview/                          # 离线渲染的设计评审图 + 设置中心截图
-scripts/build-settings.ps1        # 构建自包含 WinUI 设置中心
+scripts/build-installer.ps1       # 构建 payload 并编译 Tauri 安装器
 ```
 
-依赖方向：`app → {platform, render, storage} → core`。设置中心是独立进程，
-通过 `WM_COPYDATA` 把 JSON 配置实时同步给 Dock；Dock 只接受外观、行为、动效和显示器字段，
-保留自己的条目列表。核心逻辑可在没有桌面的环境里跑单元测试；渲染器可以离线输出 PNG。
+依赖方向：`app → {platform, render, storage} → core`。设置中心由 Dock 进程内的 Rust + Slint
+窗口承载，与主程序共享配置模型和状态，不需要 .NET 或独立设置进程。设置 UI 在专用窗口线程运行，
+变更通过进程内命令队列交给 Dock 主线程校验、应用并落盘；Dock 仍是配置的唯一写者。核心逻辑
+可在没有桌面的环境里跑单元测试；渲染器可以离线输出 PNG。
 
 关键实现细节：
 
@@ -314,10 +332,9 @@ scripts/build-settings.ps1        # 构建自包含 WinUI 设置中心
 - **桌面层级**：Dock 使用 `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED`，
   默认不带 `WS_EX_TOPMOST`；显示时尝试插入到桌面之上、普通窗口之下。设置中的
   `desktop` / `dynamic` / `topmost` 分别对应桌面同级、交互时置顶、始终置顶。
-- **设置进程**：Dock 通过 `--settings` 启动 `GlideDock.Settings.exe --owner <hwnd>
-  --config <path>`；C# 端每次改动都通过 `WM_COPYDATA` 发送 JSON。**Dock 是
-  `config.json` 的唯一写者**：收到设置后 300 ms 防抖落盘，设置进程不再整文件回写，
-  因此不会覆盖 Dock 期间新增/删除的条目。Dock 退出时结束子进程。
+- **设置窗口**：设置 UI 使用 Rust + Slint，作为 Dock 进程内窗口运行；窗口线程通过
+  命令队列把变更交给 Dock 主线程。**Dock 是 `config.json` 的唯一写者**，并负责校验、
+  即时应用和落盘，不会覆盖设置窗口打开期间新增或删除的条目。
 - **启动**：普通 `.exe` 使用 `CreateProcessW` + `CreateEnvironmentBlock`（标准用户环境）
   和解析出的工作目录；`.lnk` 已解析为 EXE 时直接启动，否则交给 ShellExecuteEx；文件、
   文件夹和 URL 走 ShellExecuteEx；商店应用走 `IApplicationActivationManager`，Low
@@ -352,8 +369,8 @@ cargo run -p glide-dock -- --render-preview preview
 - 已在 125% 缩放、2560×1440 工作区上手工验证窗口透明、悬停放大、提示、菜单、
   启动、拖动排序、拖出移除、菜单移除、退出与配置落盘；
 - 启动请求由 LauncherService 后台线程执行，ShellExecute 慢时动画不受阻塞；
-- WinUI 3 设置中心 `build-settings.ps1` 自包含发布通过并可启动；旧版主题/外观/行为/
-  搜索/实时同步验证保持有效；动效预设、参数与复制按钮需在可交互桌面环境点检；
+- Rust + Tauri `glide-setup.exe` 构建链路已迁移；安装器 UI 需要 Microsoft Edge WebView2 Runtime；
+  Dock/Slint 运行与分发不需要 .NET；动效预设、参数与复制按钮需在可交互桌面环境点检；
 - 设置窗口可拖动整个标题栏空余区域，位置写入配置旁的 `settings-window.txt`，
   重新打开不会回到居中；已实测拖动后保存/恢复为同一物理位置；
 - 设置/启动修复：`.exe` 改走 `CreateProcessW` + 标准用户环境块；`.lnk` 不再重复
@@ -369,7 +386,8 @@ cargo run -p glide-dock -- --render-preview preview
 
 - 自动隐藏与全局热键尚未接线（Dock 已支持双模式开机自启动）。
 - 多显示器切换只会在 `WM_DISPLAYCHANGE` 时重新排布，未记忆具体显示器。
-- 设置中心是独立自包含 WinUI 3 进程，发布目录约 184 MB（含内置 Noto Sans SC 字体）；构建需要 .NET 8 SDK。
+- Tauri 安装器依赖目标机的 Microsoft Edge WebView2 Runtime；未安装时安装向导无法显示。
+- Dock/Slint 分发为 .NET-free；仓库中的 `settings-app` 与 `setup-app` 源码保留，但不参与当前安装器构建。
 - UWP/Store 应用请通过开始菜单快捷方式（`.lnk`）加入；直接加入其 WindowsApps
   `.exe` 可能无法激活包身份。
 - 运行状态由 `SetWinEventHook` 窗口事件驱动；启动等待由可见窗口确认或 12 s 超时
@@ -381,7 +399,7 @@ cargo run -p glide-dock -- --render-preview preview
 - 原生毛玻璃的 Dock 背景固定在基础矩形，悬停时图标可以放大到玻璃之外。
 - 图标缓存只在内存中，重启后重新提取；容量为 `max(64, 条目数)`，重载时清空。
   大字体数据使工作集高于 README 早期目标。
-- UI 文案目前为中文硬编码，没有本地化。
+- UI 文案目前以中文为主，尚未提供多语言切换。
 - 安装包未做代码签名；SmartScreen 可能拦截未签名构建。
 
 ## 文档
@@ -398,8 +416,6 @@ cargo run -p glide-dock -- --render-preview preview
 Glide-Dock 源代码：MIT OR Apache-2.0，见 [LICENSE-MIT](LICENSE-MIT) 与
 [LICENSE-APACHE](LICENSE-APACHE)。
 
-设置中心使用 Microsoft Windows App SDK / WinUI 3；该运行时与控件受 Microsoft
-软件许可条款约束，分发 `settings-app/publish` 时请一并保留其 `WindowsAppSDK-license.txt`。
-详见 [`settings-app/README.md`](settings-app/README.md)。
+安装器使用 Rust + Tauri，并依赖目标系统提供 Microsoft Edge WebView2 Runtime。Dock及其 Slint UI 不依赖 .NET；仓库中的 `settings-app` / `setup-app` 目录保留现有源代码，但不属于本安装器的构建与分发步骤。
 
 > Glide-Dock 保留 Winstep Nexus 的效率理念，但与 Winstep 无关联，也未使用其代码或皮肤资源。

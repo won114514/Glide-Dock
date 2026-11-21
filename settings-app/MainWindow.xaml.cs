@@ -1037,24 +1037,7 @@ public sealed partial class MainWindow : Window
 		FontFamily family = _uiPreferences.FontId == SettingsUiPreferences.SystemFont
 			? new FontFamily("Segoe UI")
 			: new FontFamily("ms-appx:///Assets/Fonts/NotoSansSC-VF.ttf#Noto Sans SC");
-		ApplyFontFamily(RootGrid, family);
-	}
-
-	private static void ApplyFontFamily(DependencyObject element, FontFamily family)
-	{
-		if (element is TextBlock textBlock)
-		{
-			textBlock.FontFamily = family;
-		}
-		else if (element is Control control && element is not FontIcon)
-		{
-			control.FontFamily = family;
-		}
-
-		for (int index = 0; index < VisualTreeHelper.GetChildrenCount(element); index++)
-		{
-			ApplyFontFamily(VisualTreeHelper.GetChild(element, index), family);
-		}
+		SettingsTypography.Apply(RootGrid, family);
 	}
 
 	private void LayerCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)

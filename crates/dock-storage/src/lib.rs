@@ -313,10 +313,10 @@ impl ConfigStore {
 /// Returns `%APPDATA%\Glide-Dock`, falling back to the current directory.
 #[must_use]
 pub fn config_dir() -> PathBuf {
-    if let Ok(app_data) = std::env::var("APPDATA") {
-        if !app_data.trim().is_empty() {
-            return PathBuf::from(app_data).join("Glide-Dock");
-        }
+    if let Ok(app_data) = std::env::var("APPDATA")
+        && !app_data.trim().is_empty()
+    {
+        return PathBuf::from(app_data).join("Glide-Dock");
     }
     PathBuf::from("Glide-Dock")
 }
@@ -324,10 +324,10 @@ pub fn config_dir() -> PathBuf {
 /// Returns `%LOCALAPPDATA%\Glide-Dock\logs`, falling back to the current dir.
 #[must_use]
 pub fn log_dir() -> PathBuf {
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        if !local.trim().is_empty() {
-            return PathBuf::from(local).join("Glide-Dock").join("logs");
-        }
+    if let Ok(local) = std::env::var("LOCALAPPDATA")
+        && !local.trim().is_empty()
+    {
+        return PathBuf::from(local).join("Glide-Dock").join("logs");
     }
     config_dir().join("logs")
 }
@@ -391,11 +391,11 @@ fn migrate_v0_to_v1(object: &mut serde_json::Map<String, Value>) {
 
     if let Some(items) = object.get_mut("items").and_then(Value::as_array_mut) {
         for item in items {
-            if let Some(kind) = item.get_mut("kind") {
-                if let Some(text) = kind.as_str() {
-                    let lowered = text.to_ascii_lowercase();
-                    *kind = Value::from(lowered);
-                }
+            if let Some(kind) = item.get_mut("kind")
+                && let Some(text) = kind.as_str()
+            {
+                let lowered = text.to_ascii_lowercase();
+                *kind = Value::from(lowered);
             }
         }
     }

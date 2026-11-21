@@ -1,0 +1,25 @@
+{
+  "identifier": "setup",
+  "description": "Allow only local setup wizard operations in the setup window.",
+  "windows": [
+    "setup"
+  ],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-destroy",
+    "core:window:allow-start-dragging",
+    "core:window:allow-close",
+    "core:window:allow-is-maximized",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "allow-setup-info",
+    "allow-default-destination",
+    "allow-check-destination",
+    "allow-browse-destination",
+    "allow-start-install",
+    "allow-start-uninstall",
+    "allow-operation-status",
+    "allow-finish-operation"
+  ]
+}

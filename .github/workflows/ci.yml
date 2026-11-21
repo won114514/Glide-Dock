@@ -14,32 +14,36 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-
-      - name: Install .NET SDK
-        uses: actions/setup-dotnet@v6
+      - name: Install Node.js
+        uses: actions/setup-node@v6
         with:
-          dotnet-version: 8.0.x
-
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: installer/ui/package-lock.json
+      - name: Build Fluent UI installer frontend
+        shell: pwsh
+        run: .\scripts\build-installer-ui.ps1
+      - name: Test installer interface
+        working-directory: installer/ui
+        run: |
+          npx playwright install chromium
+          npm test
+      - name: Test CNB publisher
+        run: node --test scripts/tests/publish-cnb.test.mjs
       - name: Format
         run: cargo fmt --all -- --check
-
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
-
       - name: Test
         run: cargo test --locked --workspace
-
       - name: Release build
         run: cargo build --locked --release -p glide-dock
-
       - name: Verify release tag version
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -47,14 +51,10 @@ jobs:
           $versionLine = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
           if (-not $versionLine) { throw 'Cannot read version from Cargo.toml' }
           $version = $versionLine.Matches[0].Groups[1].Value
-          if ($env:GITHUB_REF_NAME -ne "v$version") {
-            throw "Release tag $env:GITHUB_REF_NAME does not match workspace version v$version"
-          }
-
-      - name: Build branded installer
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Release tag $env:GITHUB_REF_NAME does not match workspace version v$version" }
+      - name: Build standalone Tauri installer
         shell: pwsh
         run: .\scripts\build-installer.ps1 -OutputDirectory "$env:GITHUB_WORKSPACE\dist\installer"
-
       - name: Upload release assets
         if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v7
@@ -67,24 +67,50 @@ jobs:
           retention-days: 7
           compression-level: 0
 
-  publish:
+  publish-github:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: windows
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
       - name: Download installer
         uses: actions/download-artifact@v8
         with:
           name: glide-dock-installer
           path: release-assets
-
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
         with:
+          body_path: docs/releases/${{ github.ref_name }}.md
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
             release-assets/Glide-Dock-v*-Setup.exe
             release-assets/Glide-Dock-v*-Setup.exe.sha256
+
+  publish-cnb:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Download installer
+        uses: actions/download-artifact@v8
+        with:
+          name: glide-dock-installer
+          path: release-assets
+      - name: Synchronize source and publish CNB Release
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+          CNB_REPOSITORY: ${{ vars.CNB_REPOSITORY || 'won114514/Glide-Dock' }}
+        run: node scripts/publish-cnb.mjs --tag "$GITHUB_REF_NAME" --assets release-assets

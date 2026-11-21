@@ -13,6 +13,10 @@ internal sealed partial class SetupWindow
         StepList.Children.Clear();
         PageHost.Children.Clear();
         _appChecks.Clear();
+        _progressRing = null;
+        _progressBar = null;
+        _progressPercentText = null;
+        _statusText = null;
         BackButton.Visibility = Visibility.Visible;
         BackButton.IsEnabled = !_busy;
         CancelButton.IsEnabled = !_busy;
@@ -23,6 +27,13 @@ internal sealed partial class SetupWindow
 
         switch (_page)
         {
+            case WizardPage.Preflight:
+                RenderSteps("环境检查", "安装选项", "首次设置");
+                RenderEnvironmentCheck();
+                BackButton.Visibility = Visibility.Collapsed;
+                CancelButton.Visibility = Visibility.Collapsed;
+                NextButton.Visibility = Visibility.Collapsed;
+                break;
             case WizardPage.Welcome:
                 RenderSteps("欢迎", "安装选项", "首次设置");
                 RenderWelcome();
@@ -41,7 +52,7 @@ internal sealed partial class SetupWindow
                 break;
             case WizardPage.Progress:
                 RenderSteps("欢迎", "安装选项", "安装中");
-                RenderProgress("正在安装 Glide-Dock", "正在准备程序文件...");
+                RenderProgress("正在安装 Glide-Dock", "正在验证安装位置...", determinate: true);
                 BackButton.Visibility = Visibility.Collapsed;
                 CancelButton.Visibility = Visibility.Collapsed;
                 NextButton.Visibility = Visibility.Collapsed;
@@ -150,6 +161,67 @@ internal sealed partial class SetupWindow
             : _existing.IsLegacy
                 ? "升级会迁移旧安装记录，不会创建并行副本。"
                 : "不会创建并行安装。升级期间会暂时关闭 Dock 和设置中心。");
+
+        if (_environmentChecks.Count > 0)
+        {
+            AddLabel("启动环境检查", 14);
+            foreach (var check in _environmentChecks)
+            {
+                var color = check.State switch
+                {
+                    CheckState.Passed => Brush(16, 124, 92),
+                    CheckState.Warning => Brush(181, 112, 0),
+                    _ => Brush(190, 54, 48)
+                };
+                var row = new Grid { ColumnSpacing = 10, Margin = new Thickness(0, 2, 0, 2) };
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8) });
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                row.Children.Add(new Border
+                {
+                    Width = 8,
+                    Height = 8,
+                    CornerRadius = new CornerRadius(4),
+                    Background = color,
+                    VerticalAlignment = VerticalAlignment.Top,
+                    Margin = new Thickness(0, 6, 0, 0)
+                });
+                var detail = new StackPanel { Spacing = 1 };
+                detail.Children.Add(new TextBlock
+                {
+                    Text = check.Title,
+                    FontSize = 13,
+                    FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+                    Foreground = Brush(47, 57, 66)
+                });
+                detail.Children.Add(new TextBlock
+                {
+                    Text = check.Detail,
+                    FontSize = 12,
+                    Foreground = Brush(113, 124, 133),
+                    TextWrapping = TextWrapping.Wrap
+                });
+                Grid.SetColumn(detail, 1);
+                row.Children.Add(detail);
+                PageHost.Children.Add(row);
+            }
+        }
+        NextButton.IsEnabled = _preflightPassed;
+    }
+
+    private void RenderEnvironmentCheck()
+    {
+        AddEyebrow("启动检查");
+        AddHeading("正在检查安装环境");
+        AddBody("检查 Windows 版本、系统架构、安装包完整性和默认位置空间。", 2);
+        _progressRing = new ProgressRing
+        {
+            IsActive = true,
+            Width = 34,
+            Height = 34,
+            Margin = new Thickness(0, 14, 0, 6)
+        };
+        PageHost.Children.Add(_progressRing);
+        AddNote("检查完成后才会进入安装向导。", 2);
     }
 
     private void RenderInstallOptions()
@@ -249,12 +321,53 @@ internal sealed partial class SetupWindow
         AddNote("只显示本机已检测到的应用；取消全部即可从空 Dock 开始。", 4);
     }
 
-    private void RenderProgress(string title, string message)
+    private void RenderProgress(string title, string message, bool determinate = false)
     {
         AddEyebrow("GLIDE-DOCK");
         AddHeading(title);
-        _progressRing = new ProgressRing { IsActive = true, Width = 34, Height = 34, Margin = new Thickness(0, 14, 0, 6) };
-        PageHost.Children.Add(_progressRing);
+        if (determinate)
+        {
+            var progressRow = new Grid
+            {
+                ColumnSpacing = 14,
+                Margin = new Thickness(0, 18, 0, 8),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            progressRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            progressRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            _progressBar = new ProgressBar
+            {
+                Minimum = 0,
+                Maximum = 100,
+                Value = 0,
+                Height = 6,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            progressRow.Children.Add(_progressBar);
+            _progressPercentText = new TextBlock
+            {
+                Text = "0%",
+                FontSize = 13,
+                MinWidth = 38,
+                TextAlignment = TextAlignment.Right,
+                Foreground = Brush(84, 96, 106),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            Grid.SetColumn(_progressPercentText, 1);
+            progressRow.Children.Add(_progressPercentText);
+            PageHost.Children.Add(progressRow);
+        }
+        else
+        {
+            _progressRing = new ProgressRing
+            {
+                IsActive = true,
+                Width = 34,
+                Height = 34,
+                Margin = new Thickness(0, 14, 0, 6)
+            };
+            PageHost.Children.Add(_progressRing);
+        }
         _statusText = AddBody(message);
     }
 

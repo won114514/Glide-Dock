@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.IO;
+using System.IO.Pipes;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -18,6 +20,7 @@ internal sealed partial class SetupWindow
         switch (_page)
         {
             case WizardPage.Welcome:
+                if (!_preflightPassed) return;
                 if (_existing is not null)
                 {
                     _options = OptionsForUpdate(_existing);
@@ -71,6 +74,7 @@ internal sealed partial class SetupWindow
             var scope = scopeValue is InstallScope value ? value : InstallScope.AllUsers;
             var path = _installPathBox?.Text.Trim() ?? string.Empty;
             InstallerEngine.ValidateInstallDirectory(path, update: false);
+            InstallerEngine.ValidateInstallCapacity(path);
             _options = _options with
             {
                 Scope = scope,
@@ -181,18 +185,15 @@ internal sealed partial class SetupWindow
     private async Task InstallFromUiAsync(InstallOptions options)
     {
         var restartDock = options.IsUpdate && InstallerEngine.IsDockRunning();
+        var progress = new Progress<InstallProgress>(UpdateInstallProgress);
         if (options.Scope == InstallScope.AllUsers)
         {
-            using var process = StartWorker(CurrentSetupPath, "--install-worker", options.ToBase64(), elevate: true);
-            await process.WaitForExitAsync();
-            if (process.ExitCode != 0)
-            {
-                throw new InvalidOperationException("安装工作进程未能完成。请检查权限后重试。");
-            }
+            await RunElevatedInstallAsync(options, progress);
         }
         else
         {
-            await InstallerEngine.InstallAsync(options, CurrentSetupPath, machineScope: false, CancellationToken.None);
+            await InstallerEngine.InstallAsync(
+                options, CurrentSetupPath, machineScope: false, CancellationToken.None, progress);
         }
 
         if (!options.IsUpdate && !_hasExistingConfig)
@@ -209,6 +210,95 @@ internal sealed partial class SetupWindow
         if (restartDock)
         {
             InstallerEngine.LaunchInstalledDock(options.InstallDirectory);
+        }
+    }
+
+    private async Task RunElevatedInstallAsync(
+        InstallOptions options,
+        IProgress<InstallProgress> progress)
+    {
+        var pipeName = "GlideDock-Install-" + Guid.NewGuid().ToString("N");
+        await using var pipe = new NamedPipeServerStream(
+            pipeName,
+            PipeDirection.In,
+            1,
+            PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        using var process = StartWorker(
+            CurrentSetupPath, "--install-worker", options.ToBase64(), elevate: true, extra: pipeName);
+
+        var connection = pipe.WaitForConnectionAsync();
+        var processExit = process.WaitForExitAsync();
+        var first = await Task.WhenAny(connection, processExit);
+        if (first == processExit && !pipe.IsConnected)
+        {
+            await processExit;
+            throw new InvalidOperationException(
+                process.ExitCode == 0
+                    ? "安装工作进程提前退出，安装没有执行。"
+                    : "安装工作进程未能启动。请检查管理员授权后重试。");
+        }
+        await connection;
+
+        using var reader = new StreamReader(
+            pipe, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: false,
+            bufferSize: 1024, leaveOpen: true);
+        string? workerError = null;
+        while (await reader.ReadLineAsync() is { } line)
+        {
+            InstallProgress? update;
+            try
+            {
+                update = JsonSerializer.Deserialize<InstallProgress>(line);
+            }
+            catch (JsonException error)
+            {
+                throw new InvalidDataException("管理员安装进程返回了无效的进度数据。", error);
+            }
+            if (update is null) continue;
+            if (update.IsError) workerError = update.Message;
+            progress.Report(update);
+        }
+
+        await process.WaitForExitAsync();
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException(workerError ?? "安装未能完成，请检查权限和磁盘状态后重试。");
+        }
+    }
+
+    private void UpdateInstallProgress(InstallProgress progress)
+    {
+        if (_statusText is not null) _statusText.Text = progress.Message;
+        if (_progressBar is not null) _progressBar.Value = Math.Clamp(progress.Percent, 0, 100);
+        if (_progressPercentText is not null) _progressPercentText.Text = $"{Math.Clamp(progress.Percent, 0, 100)}%";
+    }
+
+    private async Task RunStartupPreflightAsync()
+    {
+        _page = WizardPage.Preflight;
+        _errorText = null;
+        RenderPage();
+        try
+        {
+            var directory = _existing?.InstallDirectory
+                ?? InstallerEngine.DefaultInstallDirectory(InstallScope.AllUsers);
+            _environmentChecks = await Task.Run(() => InstallerEngine.CheckEnvironment(directory));
+            _preflightPassed = _environmentChecks.All(check => check.State != CheckState.Failed);
+            if (!_preflightPassed)
+            {
+                _errorText = ErrorBlock("环境检查未通过。请确认系统要求并重新下载完整安装包。");
+            }
+        }
+        catch (Exception error)
+        {
+            _preflightPassed = false;
+            _errorText = ErrorBlock("无法完成启动环境检查：" + error.Message);
+        }
+        finally
+        {
+            _page = WizardPage.Welcome;
+            RenderPage();
         }
     }
 

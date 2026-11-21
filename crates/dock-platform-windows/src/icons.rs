@@ -253,16 +253,15 @@ fn hbitmap_to_image(hbitmap: HBITMAP) -> Result<IconImage> {
 /// tells us which one we received and avoids dark halos around icons.
 fn normalize_bgra(bgra: &[u8], width: u32, height: u32) -> IconImage {
     let pixel_count = (width as usize) * (height as usize);
-    let has_alpha = bgra
-        .chunks_exact(4)
-        .take(pixel_count)
-        .any(|pixel| pixel[3] != 0);
-    let straight = bgra.chunks_exact(4).take(pixel_count).any(|pixel| {
+    let (all_pixels, _) = bgra.as_chunks::<4>();
+    let pixels = &all_pixels[..pixel_count.min(all_pixels.len())];
+    let has_alpha = pixels.iter().any(|pixel| pixel[3] != 0);
+    let straight = pixels.iter().any(|pixel| {
         pixel[3] != 0 && (pixel[0] > pixel[3] || pixel[1] > pixel[3] || pixel[2] > pixel[3])
     });
 
     let mut rgba = Vec::with_capacity(pixel_count * 4);
-    for pixel in bgra.chunks_exact(4).take(pixel_count) {
+    for pixel in pixels {
         let blue = u32::from(pixel[0]);
         let green = u32::from(pixel[1]);
         let red = u32::from(pixel[2]);

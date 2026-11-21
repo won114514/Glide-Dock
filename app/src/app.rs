@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::ffi::c_void;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use dock_core::events::DockCommand;
@@ -39,20 +39,21 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetForegroundWindow, GetSystemMetrics, HTCLIENT,
     HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOPMOST, KillTimer, MA_NOACTIVATE, PostQuitMessage,
     SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    WM_CAPTURECHANGED, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_DROPFILES, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
-    WM_NCHITTEST, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
+    SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_APP,
+    WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DROPFILES,
+    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST,
+    WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
 };
 
 use crate::launcher::LauncherService;
 use crate::render_loop::{FrameClock, frame_interval_ms};
 use crate::wndproc::dock_wndproc;
 mod settings;
-use settings::{SettingsHost, SettingsLaunchError};
+use settings::{SettingsHost, SettingsValues, WM_APP_SETTINGS_COMMAND};
 
 /// Mouse leave notification (defined in Win32::UI::Controls).
 const WM_MOUSELEAVE: u32 = 0x02A3;
+pub const WM_APP_OPEN_SETTINGS: u32 = WM_APP + 8;
 
 const TIMER_FRAME: usize = 1;
 const TIMER_TOOLTIP: usize = 2;
@@ -532,6 +533,7 @@ impl DockApp {
                 self.system_animations = animations_enabled();
                 self.apply_motion_config();
                 self.on_theme_changed();
+                self.settings.sync_system_theme();
                 self.animate();
                 LRESULT(0)
             }
@@ -544,9 +546,13 @@ impl DockApp {
                 }
                 LRESULT(0)
             }
-            WM_COPYDATA => {
-                let handled = self.on_settings_update(wparam, lparam);
-                LRESULT(if handled { 1 } else { 0 })
+            WM_APP_SETTINGS_COMMAND => {
+                self.on_settings_commands();
+                LRESULT(0)
+            }
+            WM_APP_OPEN_SETTINGS => {
+                self.show_settings();
+                LRESULT(0)
             }
             WM_APP_WINDOW_EVENT => {
                 self.on_window_event();
@@ -635,12 +641,11 @@ impl DockApp {
 
     fn hit_icon(&self, point: Point) -> Option<usize> {
         for (index, item) in self.config.items.iter().enumerate() {
-            if item.kind == ItemKind::Separator {
-                if let Some(rect) = self.geometry.slot_rects().get(index) {
-                    if rect.contains(point) {
-                        return Some(index);
-                    }
-                }
+            if item.kind == ItemKind::Separator
+                && let Some(rect) = self.geometry.slot_rects().get(index)
+                && rect.contains(point)
+            {
+                return Some(index);
             }
         }
         self.layout.hit_icon(point)
@@ -1118,13 +1123,13 @@ impl DockApp {
         // dock itself never activates, so a change after that means the user
         // switched to another window.
         let foreground = unsafe { GetForegroundWindow() };
-        if menu_age >= 0.25 {
-            if let Some(expected) = self.menu_foreground {
-                if !foreground.0.is_null() && foreground != expected {
-                    self.close_menu();
-                    return;
-                }
-            }
+        if menu_age >= 0.25
+            && let Some(expected) = self.menu_foreground
+            && !foreground.0.is_null()
+            && foreground != expected
+        {
+            self.close_menu();
+            return;
         }
         let escape = key_down(VK_ESCAPE);
         if escape {
@@ -1175,7 +1180,9 @@ impl DockApp {
             }
             DockCommand::OpenMenu { target, at } => self.open_menu(target, at),
             DockCommand::CloseMenu => self.close_menu(),
-            DockCommand::ReloadConfig => self.reload_config(),
+            DockCommand::ReloadConfig => {
+                self.reload_config();
+            }
             DockCommand::RefreshItems => {
                 self.request_all_icons();
                 self.render();
@@ -1485,7 +1492,7 @@ impl DockApp {
         }
     }
 
-    fn reload_config(&mut self) {
+    fn reload_config(&mut self) -> bool {
         match self.store.load() {
             Ok(outcome) => {
                 for warning in &outcome.warnings {
@@ -1508,8 +1515,12 @@ impl DockApp {
                 self.animate();
                 self.render();
                 tracing::info!("configuration reloaded");
+                true
             }
-            Err(error) => self.set_error(format!("重新加载配置失败：{error}")),
+            Err(error) => {
+                self.set_error(format!("重新加载配置失败：{error}"));
+                false
+            }
         }
     }
 
@@ -1534,10 +1545,10 @@ impl DockApp {
             TrayEvent::OpenSettings => self.show_settings(),
             TrayEvent::ShowMenu => self.open_tray_menu(),
             TrayEvent::ReAdd => {
-                if let Some(tray) = self.tray.as_mut() {
-                    if let Err(error) = tray.reinstall() {
-                        tracing::warn!(%error, "could not restore notification-area icon");
-                    }
+                if let Some(tray) = self.tray.as_mut()
+                    && let Err(error) = tray.reinstall()
+                {
+                    tracing::warn!(%error, "could not restore notification-area icon");
                 }
             }
         }
@@ -1888,17 +1899,16 @@ impl DockApp {
                 if wparam.0 == TIMER_TRAY_MENU {
                     if key_down(VK_ESCAPE) {
                         self.close_tray_menu();
-                    } else if key_down(VK_LBUTTON) || key_down(VK_RBUTTON) {
-                        if let (Some(cursor), Some(menu)) =
+                    } else if (key_down(VK_LBUTTON) || key_down(VK_RBUTTON))
+                        && let (Some(cursor), Some(menu)) =
                             (cursor_position(), self.tray_menu.as_ref())
-                        {
-                            let local = Point::new(
-                                cursor.x as f32 - menu.origin.x,
-                                cursor.y as f32 - menu.origin.y,
-                            );
-                            if !menu.contains(local) {
-                                self.close_tray_menu();
-                            }
+                    {
+                        let local = Point::new(
+                            cursor.x as f32 - menu.origin.x,
+                            cursor.y as f32 - menu.origin.y,
+                        );
+                        if !menu.contains(local) {
+                            self.close_tray_menu();
                         }
                     }
                 }
@@ -1940,17 +1950,10 @@ impl DockApp {
             self.set_error("配置为只读，暂时无法打开设置".to_string());
             return;
         }
-        if let Err(error) = self.settings.open(self.hwnd, self.store.path()) {
-            match error {
-                SettingsLaunchError::NotBuilt => self.set_error(
-                    "设置组件未构建：请运行 scripts/build-settings.ps1 或把 GlideDock.Settings.exe 放到 settings 目录"
-                        .to_string(),
-                ),
-                error => {
-                    tracing::error!(%error, "failed to launch settings");
-                    self.set_error(format!("无法启动设置组件：{error}"));
-                }
-            }
+        let values = SettingsValues::from_config(&self.config);
+        if let Err(error) = self.settings.open(self.hwnd, values, self.store.path()) {
+            tracing::error!(%error, "failed to open settings");
+            self.set_error(format!("无法打开设置窗口：{error}"));
         }
     }
 
@@ -1970,7 +1973,7 @@ impl DockApp {
         self.save_now();
         self.kill_all_timers();
         release_mouse();
-        self.settings.close();
+        self.settings.shutdown();
         if let Some(mut tray) = self.tray.take() {
             tray.remove();
         }
@@ -1989,7 +1992,7 @@ impl DockApp {
         self.shutdown_done = true;
         self.kill_all_timers();
         release_mouse();
-        self.settings.close();
+        self.settings.shutdown();
         if let Some(mut tray) = self.tray.take() {
             tray.remove();
         }
@@ -2345,12 +2348,13 @@ impl DockApp {
             TIMER_TOOLTIP => {
                 self.kill_timer(TIMER_TOOLTIP);
                 self.tooltip_timer = false;
-                if !self.state.menu_open && self.config.behavior.show_tooltips {
-                    if let Some(index) = self.state.hovered {
-                        self.state.tooltip.index = Some(index);
-                        self.tooltip_spring.set_target(1.0);
-                        self.animate();
-                    }
+                if !self.state.menu_open
+                    && self.config.behavior.show_tooltips
+                    && let Some(index) = self.state.hovered
+                {
+                    self.state.tooltip.index = Some(index);
+                    self.tooltip_spring.set_target(1.0);
+                    self.animate();
                 }
             }
             TIMER_SAVE => {
@@ -2420,10 +2424,10 @@ impl DockApp {
                 paths.push(format!("shell:AppsFolder\\{aumid}"));
             }
         } else {
-            if let Some(shortcut) = &item.shortcut_path {
-                if !shortcut.trim().is_empty() {
-                    paths.push(shortcut.clone());
-                }
+            if let Some(shortcut) = &item.shortcut_path
+                && !shortcut.trim().is_empty()
+            {
+                paths.push(shortcut.clone());
             }
             if !item.target_path.trim().is_empty() {
                 paths.push(item.target_path.clone());
@@ -2606,14 +2610,6 @@ fn resolve_theme(mode: ThemeMode) -> ResolvedTheme {
 
 fn palette_for(config: &DockConfig, theme: ResolvedTheme) -> Palette {
     Palette::for_theme(theme).with_accent(config.appearance.accent)
-}
-
-/// Resolves a possibly relative configuration path before handing it to the
-/// settings process, whose working directory is the settings folder.
-fn absolute_config_path(path: &Path) -> PathBuf {
-    path.canonicalize()
-        .or_else(|_| std::path::absolute(path))
-        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn compute_unresolved(config: &DockConfig) -> BTreeSet<u32> {

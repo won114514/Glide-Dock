@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 dock-core.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 windows.workspace = true

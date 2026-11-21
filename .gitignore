@@ -1,5 +1,6 @@
 # Rust
 /target/
+/installer/gen/
 **/*.rs.bk
 
 # .NET / WinUI build locals
@@ -31,3 +32,7 @@ preview/live-*.png
 preview/selftest.png
 *.log
 dist/
+
+# Installer frontend
+/installer/ui/node_modules/
+/installer/ui/playwright-report/

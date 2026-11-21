@@ -7,6 +7,7 @@
 
 use ab_glyph::{Font, FontArc, GlyphId, PxScale, ScaleFont, point};
 use dock_core::Color;
+use std::sync::OnceLock;
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
 /// Font weight selection.
@@ -20,14 +21,18 @@ pub enum Weight {
 
 struct Family {
     faces: Vec<FontArc>,
+    cjk_fallback: bool,
 }
 
 impl Family {
-    fn new(faces: Vec<FontArc>) -> Option<Self> {
+    fn new(faces: Vec<FontArc>, cjk_fallback: bool) -> Option<Self> {
         if faces.is_empty() {
             None
         } else {
-            Some(Self { faces })
+            Some(Self {
+                faces,
+                cjk_fallback,
+            })
         }
     }
 
@@ -36,6 +41,13 @@ impl Family {
             .iter()
             .enumerate()
             .find(|(_, font)| font.glyph_id(character).0 != 0)
+            .or_else(|| {
+                self.cjk_fallback
+                    .then(cjk_font)
+                    .flatten()
+                    .filter(|font| font.glyph_id(character).0 != 0)
+                    .map(|font| (self.faces.len(), font))
+            })
     }
 
     fn primary(&self) -> &FontArc {
@@ -83,20 +95,12 @@ impl FontStack {
         let segoe = load_font(&font_path("segoeui.ttf"), 0);
         let segoe_semibold = load_font(&font_path("seguisb.ttf"), 0)
             .or_else(|| load_font(&font_path("segoeuib.ttf"), 0));
-        let yahei = load_font(&font_path("msyh.ttc"), 0);
-
-        let regular_faces = [segoe.clone(), yahei.clone()]
-            .into_iter()
-            .flatten()
-            .collect();
-        let semibold_faces = [segoe_semibold.or(segoe), yahei]
-            .into_iter()
-            .flatten()
-            .collect();
+        let regular_faces = [segoe.clone()].into_iter().flatten().collect();
+        let semibold_faces = [segoe_semibold.or(segoe)].into_iter().flatten().collect();
 
         Self {
-            regular: Family::new(regular_faces),
-            semibold: Family::new(semibold_faces),
+            regular: Family::new(regular_faces, true),
+            semibold: Family::new(semibold_faces, true),
         }
     }
 
@@ -127,10 +131,10 @@ impl FontStack {
             };
             let scaled = face.as_scaled(PxScale::from(size));
             let glyph = scaled.glyph_id(character);
-            if let Some((previous_face, previous_glyph)) = previous {
-                if previous_face == face_index {
-                    width += scaled.kern(previous_glyph, glyph);
-                }
+            if let Some((previous_face, previous_glyph)) = previous
+                && previous_face == face_index
+            {
+                width += scaled.kern(previous_glyph, glyph);
             }
             width += scaled.h_advance(glyph);
             previous = Some((face_index, glyph));
@@ -190,10 +194,10 @@ impl FontStack {
             };
             let scaled = face.as_scaled(PxScale::from(size));
             let glyph_id = scaled.glyph_id(character);
-            if let Some((previous_face, previous_glyph)) = previous {
-                if previous_face == face_index {
-                    pen += scaled.kern(previous_glyph, glyph_id);
-                }
+            if let Some((previous_face, previous_glyph)) = previous
+                && previous_face == face_index
+            {
+                pen += scaled.kern(previous_glyph, glyph_id);
             }
             let advance = scaled.h_advance(glyph_id);
             if glyph_id.0 != 0 && color.a > 0 {
@@ -283,6 +287,19 @@ impl FontStack {
         result.push_str(ellipsis);
         result
     }
+}
+
+fn cjk_font() -> Option<&'static FontArc> {
+    static CJK_FONT: OnceLock<Option<FontArc>> = OnceLock::new();
+    CJK_FONT
+        .get_or_init(|| {
+            let fonts_dir = std::env::var("WINDIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Windows"))
+                .join("Fonts");
+            load_font(&fonts_dir.join("msyh.ttc").to_string_lossy(), 0)
+        })
+        .as_ref()
 }
 
 fn load_font(path: &str, index: u32) -> Option<FontArc> {

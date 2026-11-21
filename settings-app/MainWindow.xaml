@@ -68,8 +68,8 @@
             </StackPanel.RenderTransform>
             <Grid Margin="4,0,4,14">
               <StackPanel Spacing="2">
-                <TextBlock x:Name="PageTitle" FontSize="32" FontWeight="SemiBold" Text="常规" />
-                <TextBlock x:Name="PageSubtitle" FontSize="15" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="主题、强调色与配置文件。" TextWrapping="Wrap" />
+                <TextBlock x:Name="PageTitle" FontSize="28" FontWeight="SemiBold" Text="常规" />
+                <TextBlock x:Name="PageSubtitle" FontSize="14" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="主题、强调色与配置文件。" TextWrapping="Wrap" />
               </StackPanel>
             </Grid>
             <!-- General -->

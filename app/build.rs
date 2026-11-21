@@ -1,4 +1,7 @@
 fn main() {
+    println!("cargo:rerun-if-changed=ui/settings.slint");
+    slint_build::compile("ui/settings.slint").expect("failed to compile Glide-Dock settings UI");
+
     #[cfg(windows)]
     {
         let icon = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

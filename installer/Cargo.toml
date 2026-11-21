@@ -1,0 +1,22 @@
+[package]
+name = "glide-setup"
+description = "Glide-Dock installation and maintenance wizard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+dock-core.workspace = true
+dock-platform-windows.workspace = true
+dock-storage.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tauri = { version = "=2.12.7", default-features = false, features = ["wry", "custom-protocol", "compression", "common-controls-v6"] }
+windows.workspace = true
+zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
+
+[build-dependencies]
+tauri-build = "=2.7.6"

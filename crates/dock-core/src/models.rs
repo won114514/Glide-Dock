@@ -636,15 +636,15 @@ impl DockConfig {
             if item.display_name.is_empty() {
                 item.display_name = "Untitled".to_string();
             }
-            if let Some(arguments) = &item.arguments {
-                if arguments.trim().is_empty() {
-                    item.arguments = None;
-                }
+            if let Some(arguments) = &item.arguments
+                && arguments.trim().is_empty()
+            {
+                item.arguments = None;
             }
-            if let Some(dir) = &item.working_directory {
-                if dir.trim().is_empty() {
-                    item.working_directory = None;
-                }
+            if let Some(dir) = &item.working_directory
+                && dir.trim().is_empty()
+            {
+                item.working_directory = None;
             }
         }
 

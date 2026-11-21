@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "app",
+    "installer",
     "crates/dock-core",
     "crates/dock-render",
     "crates/dock-storage",
@@ -9,9 +10,9 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 authors = ["Glide-Dock contributors"]
 license = "MIT OR Apache-2.0"
 
@@ -38,14 +39,20 @@ windows = { version = "0.62.2", features = [    "Win32_Foundation",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Com",
     "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
     "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",
     "Wdk_System_SystemServices",
     "Win32_System_Threading",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Environment",
+    "Win32_System_ProcessStatus",
     "Win32_System_Registry",
+    "Win32_System_TaskScheduler",
+    "Win32_System_Variant",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
 ] }
 tiny-skia = "0.12.0"
@@ -55,6 +62,8 @@ serde_json = "1.0.154"
 thiserror = "2.0.21"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+slint = { version = "=1.19.0", default-features = false, features = ["std", "backend-winit", "renderer-software", "accessibility", "compat-1-2", "unstable-winit-030", "unstable-fontique-012"] }
+slint-build = "=1.19.0"
 
 [profile.release]
 lto = "thin"

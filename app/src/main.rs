@@ -14,20 +14,23 @@ use std::time::Duration;
 
 use dock_platform_windows::{
     ComGuard, DOCK_WINDOW_CLASS, SingleInstance, SingleInstanceOutcome, create_layered_popup,
-    register_class, wait_for_desktop,
+    register_class, wait_for_desktop, wide,
 };
 use dock_storage::ConfigStore;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, MSG, TranslateMessage,
+    DispatchMessageW, FindWindowW, GetMessageW, MSG, SMTO_ABORTIFHUNG, SendMessageTimeoutW,
+    TranslateMessage,
 };
+use windows::core::PCWSTR;
 
-use crate::app::DockApp;
+use crate::app::{DockApp, WM_APP_OPEN_SETTINGS};
 use crate::wndproc::dock_wndproc;
 
 fn main() -> std::process::ExitCode {
@@ -177,6 +180,9 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
             SingleInstanceOutcome::Acquired(instance) => Some(instance),
             SingleInstanceOutcome::AlreadyRunning => {
                 tracing::info!("another Glide-Dock instance is already running");
+                if options.open_settings {
+                    request_settings_from_running_instance();
+                }
                 return Ok(());
             }
             SingleInstanceOutcome::Failed(error) => {
@@ -231,10 +237,10 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if !options.selftest {
-        if let Err(error) = guard::spawn(&guard_config, options.autostart) {
-            tracing::warn!(%error, "could not start dock guard");
-        }
+    if !options.selftest
+        && let Err(error) = guard::spawn(&guard_config, options.autostart)
+    {
+        tracing::warn!(%error, "could not start dock guard");
     }
 
     if options.selftest {
@@ -257,6 +263,30 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
             app.shutdown();
         }
         Ok(())
+    }
+}
+
+fn request_settings_from_running_instance() {
+    let class = wide(DOCK_WINDOW_CLASS);
+    let Ok(hwnd) = (unsafe { FindWindowW(PCWSTR::from_raw(class.as_ptr()), PCWSTR::null()) })
+    else {
+        tracing::warn!("could not find the running dock window to open settings");
+        return;
+    };
+    let mut result = 0usize;
+    let response = unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            WM_APP_OPEN_SETTINGS,
+            WPARAM(0),
+            LPARAM(0),
+            SMTO_ABORTIFHUNG,
+            2_000,
+            Some(&mut result),
+        )
+    };
+    if response.0 == 0 {
+        tracing::warn!("could not send the settings request to the running dock");
     }
 }
 
@@ -314,6 +344,14 @@ mod tests {
             .expect("parse")
             .expect("options");
         assert!(options.autostart);
+    }
+
+    #[test]
+    fn parses_settings_flag() {
+        let options = Options::parse(vec!["--settings".to_string()])
+            .expect("parse")
+            .expect("options");
+        assert!(options.open_settings);
     }
 
     #[test]

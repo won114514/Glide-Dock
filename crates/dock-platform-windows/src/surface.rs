@@ -131,7 +131,9 @@ impl LayeredSurface {
 
         // tiny-skia stores RGBA; a 32bpp Windows DIB expects BGRA.
         let destination = unsafe { std::slice::from_raw_parts_mut(self.bits, expected) };
-        for (source, target) in rgba.chunks_exact(4).zip(destination.chunks_exact_mut(4)) {
+        let (source_pixels, _) = rgba.as_chunks::<4>();
+        let (target_pixels, _) = destination.as_chunks_mut::<4>();
+        for (source, target) in source_pixels.iter().zip(target_pixels.iter_mut()) {
             target[0] = source[2];
             target[1] = source[1];
             target[2] = source[0];

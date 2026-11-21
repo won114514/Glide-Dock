@@ -10,13 +10,13 @@
     <Border
         MinWidth="0"
         Margin="0,0,0,8"
-        Padding="18,16"
+        Padding="16,12"
         Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
         BorderThickness="1"
         CornerRadius="8">
         <StackPanel>
-            <Grid ColumnSpacing="14">
+            <Grid ColumnSpacing="12">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
@@ -24,12 +24,14 @@
                 </Grid.ColumnDefinitions>
 
                 <Border
-                    Width="40"
-                    Height="40"
+                    Width="32"
+                    Height="32"
                     VerticalAlignment="Center"
                     Background="{ThemeResource SubtleFillColorSecondaryBrush}"
                     CornerRadius="8">
                     <SymbolIcon
+                        Width="20"
+                        Height="20"
                         Symbol="{x:Bind IconSymbol, Mode=OneWay}"
                         Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
                 </Border>
@@ -40,11 +42,12 @@
                     Spacing="2">
                     <TextBlock
                         Text="{x:Bind Title, Mode=OneWay}"
-                        FontSize="16"
+                        FontSize="14"
                         FontWeight="SemiBold" />
                     <TextBlock
                         Text="{x:Bind Description, Mode=OneWay}"
-                        FontSize="14"
+                        FontSize="12"
+                        LineHeight="18"
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                         TextWrapping="Wrap" />
                 </StackPanel>
@@ -78,7 +81,7 @@
 
             <ContentPresenter
                 x:Name="ExpansionHost"
-                Margin="54,14,0,0"
+                Margin="44,14,0,0"
                 Content="{x:Bind ExpanderContent, Mode=OneWay}"
                 Visibility="Collapsed" />
         </StackPanel>

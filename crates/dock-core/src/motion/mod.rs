@@ -169,10 +169,10 @@ impl MotionEngine {
         self.tuning = tuning;
         if preset_changed {
             self.wave.reset();
-            if self.tuning.hover_preset == HoverPreset::Wave {
-                if let Some(index) = self.hovered {
-                    self.wave.trigger(now, index, Vec::new());
-                }
+            if self.tuning.hover_preset == HoverPreset::Wave
+                && let Some(index) = self.hovered
+            {
+                self.wave.trigger(now, index, Vec::new());
             }
             self.glow_started = now;
         }
