@@ -16,7 +16,7 @@ export async function mirrorGithubRelease({
   fetchImpl = fetch, runGit = args => git(args, cwd), publish = publishCnb,
   sleep = pause, attempts = 40, log = console.log, temporaryRoot = os.tmpdir(),
 }) {
-  if (!token) throw new Error('CNB pipeline token is required. Run this script inside a trusted CNB pipeline.');
+  if (!token) throw new Error('CNB_TOKEN is required to mirror release files.');
   if (!/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+$/.test(repository ?? '')) throw new Error('Invalid CNB repository.');
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(githubRepository)) throw new Error('Invalid GitHub repository.');
   if (!/^v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(tag ?? '')) throw new Error('Invalid version tag.');
@@ -48,7 +48,7 @@ export async function mirrorGithubRelease({
   }
   if (remoteObject?.type !== 'commit' || !/^[a-f0-9]{40}$/.test(remoteObject.sha)) throw new Error('GitHub tag did not resolve to a commit.');
   // Fetch from CNB: its immutable tag must match the GitHub source used to build the installer.
-  runGit(['fetch', 'origin', 'refs/tags/' + tag + ':refs/tags/' + tag]);
+  runGit(['fetch', 'https://cnb.cool/' + repository + '.git', 'refs/tags/' + tag + ':refs/tags/' + tag]);
   const commit = runGit(['rev-parse', 'refs/tags/' + tag + '^{commit}']);
   if (commit !== remoteObject.sha) throw new Error('GitHub and CNB version tags point to different commits.');
   const scratch = await mkdtemp(path.join(temporaryRoot, 'glide-release-mirror-'));

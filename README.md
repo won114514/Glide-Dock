@@ -176,10 +176,10 @@ Start 的 AppsFolder，只列出带 AUMID 的打包应用，选择后写入 Dock
 ### 双平台版本发布
 
 版本发布到 [GitHub Releases](https://github.com/won114514/Glide-Dock/releases) 和
-[CNB Releases](https://cnb.cool/won114514/Glide-Dock/-/releases)。两端使用同一次 Windows 构建生成的安装包与 SHA-256 校验文件。
+[CNB 版本与附件](https://cnb.cool/won114514/Glide-Dock/-/tags)。两端使用同一次 Windows 构建生成的安装包与 SHA-256 校验文件。
 
 推送与 `Cargo.toml` 版本一致的 `v*` 标签后，CI 先运行 Rust、安装界面和发布脚本检查，再构建发布产物。
-GitHub 先发布安装包，再同步主分支与版本标签；CNB 使用原生流水线临时令牌下载同一份文件，核验 SHA-256 并确认两个附件完整后公开版本。
+GitHub 发布安装包后，同步主分支与版本标签到 CNB，并上传同一份安装包和校验文件。当前 Git 客户端凭据使用版本提交的永久附件分发；有发版权限时也支持独立的 CNB Release 页面。
 配置、权限和失败重试见 [双平台发布说明](docs/RELEASING.md)。
 
 ### Dock 层级

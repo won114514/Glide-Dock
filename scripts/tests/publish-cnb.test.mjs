@@ -24,6 +24,7 @@ async function fixture(t, options = {}) {
   await writeFile(path.join(directory, 'notes.md'), 'Glide-Dock release notes');
   const files = new Map([[executableName, bytes], [executableName + '.sha256', Buffer.from(checksum)]]);
   const calls = [];
+  const commitAssets = options.existingCommit ? [...files].map(([name, bytes]) => ({ name, size_in_byte: bytes.length, hash_algo: 'sha256', hash_value: hash(bytes) })) : [];
   let release = options.existing ? { id: 'release-id', tag_name: tag, draft: false, assets: [...files].map(([name, bytes]) => ({ name, size: bytes.length, hash_algo: 'sha256', hash_value: hash(bytes) })) } : null;
   const fetchImpl = async (input, init = {}) => {
     const url = new URL(input);
@@ -41,6 +42,10 @@ async function fixture(t, options = {}) {
     assert.equal(init.redirect, 'error');
     if (options.forbidden) return json({ errmsg: 'Missing required scopes: repo-release:rw' }, 403);
     if (url.pathname === '/' + repo) return json({ path: repo });
+    if (url.pathname === '/' + repo + '/-/git/commit-assets/commit-123') return json(commitAssets);
+    if (options.noReleaseWrite && url.pathname === '/' + repo + '/-/releases' && init.method === 'POST') {
+      return json({ errmsg: 'Missing required scopes: ' + (options.deniedScope ?? 'repo-release:rw') }, 403);
+    }
     if (url.pathname.endsWith('/releases/tags/' + tag)) return release ? json(release) : json({ errmsg: 'Not found' }, 404);
     if (url.pathname === '/' + repo + '/-/releases') {
       const body = JSON.parse(init.body);
@@ -50,14 +55,16 @@ async function fixture(t, options = {}) {
     }
     if (url.pathname.endsWith('/asset-upload-url')) {
       const body = JSON.parse(init.body);
-      assert.equal(body.overwrite, false); assert.equal(body.ttl, 0);
+      assert.equal(body.overwrite, url.pathname.includes('/git/commit-assets/') ? undefined : false); assert.equal(body.ttl, 0);
       assert.equal(body.size, files.get(body.asset_name).length);
       return json({ upload_url: 'https://objects.example.test/' + encodeURIComponent(body.asset_name) + '?signature=private',
-        verify_url: options.untrusted ? 'https://attacker.example.test/confirm' : 'https://api.cnb.cool/' + repo + '/-/releases/release-id/asset-upload-confirmation/upload-token/' + encodeURIComponent(body.asset_name) }, 201);
+        verify_url: options.untrusted ? 'https://attacker.example.test/confirm' : 'https://api.cnb.cool' + url.pathname.replace('/asset-upload-url', '') + '/asset-upload-confirmation/upload-token/' + encodeURIComponent(body.asset_name) }, 201);
     }
     if (url.pathname.includes('/asset-upload-confirmation/')) {
       const name = decodeURIComponent(url.pathname.split('/').at(-1));
-      release.assets.push({ name, size: files.get(name).length, hash_algo: 'sha256', hash_value: hash(files.get(name)) });
+      const assets = url.pathname.includes('/git/commit-assets/') ? commitAssets : release.assets;
+      if (url.pathname.includes('/git/commit-assets/')) assert.equal(url.searchParams.get('ttl'), '0');
+      assets.push({ name, ...(url.pathname.includes('/git/commit-assets/') ? { size_in_byte: files.get(name).length } : { size: files.get(name).length }), hash_algo: 'sha256', hash_value: hash(files.get(name)) });
       return json({});
     }
     if (url.pathname === '/' + repo + '/-/releases/release-id') {
@@ -73,7 +80,7 @@ async function fixture(t, options = {}) {
     return '';
   };
   const config = { repository: repo, tag, token, assetsDirectory: 'assets', notesFile: 'notes.md', cwd: directory, fetchImpl, runGit, log() {} };
-  return { config, calls, gitCalls, directory, getRelease: () => release };
+  return { config, calls, gitCalls, directory, getRelease: () => release, getCommitAssets: () => commitAssets };
 }
 
 test('syncs only the requested branch and tag, confirms both uploads, then publishes', async t => {
@@ -142,10 +149,47 @@ test('missing token and malformed target fail without side effects', async t => 
   assert.equal(f.calls.length, 0); assert.equal(f.gitCalls.length, 0);
 });
 
-test('native CNB publication keeps the already synchronized main branch intact', async t => {
+test('mirroring keeps the already synchronized main branch intact', async t => {
   const f = await fixture(t);
   await publishCnb({ ...f.config, syncSource: false });
   assert.equal(f.gitCalls.some(args => args[0] === 'push'), false);
   assert.equal(f.getRelease().draft, false);
   assert.equal(f.getRelease().assets.length, 2);
+});
+
+test('a Git client credential falls back to permanent commit attachments only for missing Release write scope', async t => {
+  const f = await fixture(t, { noReleaseWrite: true });
+  const result = await publishCnb(f.config);
+  assert.equal(result.publication, 'commit');
+  assert.equal(result.url, 'https://cnb.cool/' + repo + '/-/commit/commit-123?tab=attachments');
+  assert.equal(f.getRelease(), null); assert.equal(f.getCommitAssets().length, 2);
+  assert.equal(f.calls.filter(call => call.method === 'PUT').length, 2);
+  assert.equal(f.calls.some(call => call.method === 'PATCH'), false);
+});
+
+test('explicit commit publication does not call Release endpoints', async t => {
+  const f = await fixture(t);
+  const result = await publishCnb({ ...f.config, publication: 'commit' });
+  assert.equal(result.publication, 'commit');
+  assert.equal(f.calls.some(call => call.url.pathname.includes('/releases')), false);
+  assert.equal(f.getCommitAssets().length, 2);
+});
+
+test('explicit Release mode reports missing Release scope without changing publication type', async t => {
+  const f = await fixture(t, { noReleaseWrite: true });
+  await assert.rejects(publishCnb({ ...f.config, publication: 'release' }), /repo-release:rw/);
+  assert.equal(f.getCommitAssets().length, 0);
+});
+
+test('other authorization failures do not silently switch publication type', async t => {
+  const f = await fixture(t, { noReleaseWrite: true, deniedScope: 'repo-manage:rw' });
+  await assert.rejects(publishCnb(f.config), /repo-manage:rw/);
+  assert.equal(f.getCommitAssets().length, 0);
+});
+
+test('retries reuse matching permanent commit attachments without duplicate uploads', async t => {
+  const f = await fixture(t, { existingCommit: true });
+  await publishCnb({ ...f.config, publication: 'commit' });
+  assert.equal(f.calls.some(call => call.method === 'PUT'), false);
+  assert.equal(f.getCommitAssets().length, 2);
 });

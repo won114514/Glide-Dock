@@ -56,14 +56,14 @@ async function fixture(t, options = {}) {
   return { config, calls, gitCalls, pauses, files, getPublication: () => publication };
 }
 
-test('mirrors verified GitHub bytes using the matching CNB tag and pipeline token', async t => {
+test('mirrors verified GitHub bytes using the matching CNB tag and provided credential', async t => {
   const f = await fixture(t);
   assert.deepEqual(await mirrorGithubRelease(f.config), { tag, commit });
   const publication = f.getPublication();
   assert.equal(publication.syncSource, false);
   assert.equal(publication.token, token);
   assert.equal(publication.repository, repository);
-  assert.deepEqual(f.gitCalls[0], ['fetch', 'origin', 'refs/tags/' + tag + ':refs/tags/' + tag]);
+  assert.deepEqual(f.gitCalls[0], ['fetch', 'https://cnb.cool/' + repository + '.git', 'refs/tags/' + tag + ':refs/tags/' + tag]);
   assert.equal(f.gitCalls.some(args => args[0] === 'push'), false);
   assert.deepEqual(f.gitCalls.at(-1).slice(0, 3), ['worktree', 'add', '--detach']);
   assert.equal(f.gitCalls.at(-1).at(-1), commit);

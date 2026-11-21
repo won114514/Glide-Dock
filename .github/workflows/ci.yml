@@ -101,12 +101,16 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Synchronize source and start the CNB release pipeline
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Download installer
+        uses: actions/download-artifact@v8
+        with:
+          name: glide-dock-installer
+          path: release-assets
+      - name: Synchronize source and publish CNB files
         env:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
           CNB_REPOSITORY: ${{ vars.CNB_REPOSITORY || 'won114514/Glide-Dock' }}
-        run: |
-          git -c credential.helper= \
-            -c 'credential.helper=!f() { if test "$1" = get; then printf "%s\n" "username=cnb" "password=$CNB_TOKEN"; fi; }; f' \
-            push --atomic "https://cnb.cool/$CNB_REPOSITORY.git" \
-            "HEAD:refs/heads/main" "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+        run: node scripts/publish-cnb.mjs --tag "$GITHUB_REF_NAME" --assets release-assets --publication auto
