@@ -1,5 +1,5 @@
 {
-  "productName": "Glide-Dock Setup",
+  "productName": "Glide-Dock 安装程序",
   "identifier": "app.glidedock.setup",
   "build": {
     "frontendDist": "../target/installer-ui"
@@ -12,14 +12,15 @@
         "title": "Glide-Dock 安装程序",
         "width": 840,
         "height": 620,
-        "minWidth": 560,
-        "minHeight": 400,
         "center": true,
         "decorations": false,
         "shadow": true,
         "dragDropEnabled": false,
         "devtools": false,
-        "create": false
+        "create": false,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false
       }
     ],
     "security": {
@@ -33,6 +34,7 @@
     "active": false,
     "icon": [
       "../assets/brand/03-Windows-ICO/Glide-Dock-FullColor.ico"
-    ]
+    ],
+    "publisher": "Glide-Dock"
   }
 }

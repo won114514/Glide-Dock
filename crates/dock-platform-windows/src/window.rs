@@ -83,13 +83,12 @@ pub fn create_layered_popup(
     Ok(hwnd)
 }
 
-/// Moves and resizes a layered window at desktop level, without activation.
+/// Moves and resizes a layered window without changing its Z order or activation.
 pub fn set_bounds(hwnd: HWND, x: i32, y: i32, width: u32, height: u32, show: bool) {
     let mut flags = SWP_NOACTIVATE | SWP_NOZORDER;
     if show {
         flags |= SWP_SHOWWINDOW;
     }
-    clear_topmost(hwnd);
     if let Err(error) = unsafe {
         SetWindowPos(
             hwnd,
@@ -103,7 +102,6 @@ pub fn set_bounds(hwnd: HWND, x: i32, y: i32, width: u32, height: u32, show: boo
     } {
         tracing::warn!(%error, "SetWindowPos failed");
     }
-    place_above_desktop(hwnd);
 }
 
 /// Shows the window without stealing focus.

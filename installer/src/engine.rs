@@ -30,17 +30,33 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, PostMessageW, WM_CLOSE};
 use windows::core::{GUID, Interface, PCWSTR, PWSTR};
 
-use self::embedded_payload::EMBEDDED_PAYLOAD;
+use self::embedded_payload::{EMBEDDED_PAYLOAD, EMBEDDED_UNINSTALLER};
 use zip::ZipArchive;
 
 const PRODUCT: &str = "Glide-Dock";
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Glide-Dock";
 const LEGACY_UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{9C6F1D7A-4B23-4D8E-9C1A-6E2F0A7B3C51}_is1";
-const SETUP_EXE: &str = "Glide-Dock-Setup.exe";
+pub const UNINSTALL_EXE: &str = "Glide-Dock 卸载程序.exe";
 const MINIMUM_FREE_SPACE: u64 = 256 * 1024 * 1024;
 
 mod embedded_payload {
     include!(concat!(env!("OUT_DIR"), "/embedded_payload.rs"));
+}
+
+fn payload_bytes() -> &'static [u8] {
+    #[cfg(all(test, not(glide_uninstaller)))]
+    if flow_tests::sandbox_active() {
+        return flow_tests::payload();
+    }
+    EMBEDDED_PAYLOAD
+}
+
+fn uninstaller_bytes() -> &'static [u8] {
+    #[cfg(all(test, not(glide_uninstaller)))]
+    if flow_tests::sandbox_active() {
+        return b"MZ-uninstaller-fixture";
+    }
+    EMBEDDED_UNINSTALLER
 }
 
 /// File/registry scope for an installation.
@@ -88,6 +104,8 @@ pub struct RecommendedApp {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallRecord {
     pub scope: InstallScope,
+    #[serde(default)]
+    pub version: Option<String>,
     pub install_directory: PathBuf,
 }
 
@@ -123,8 +141,40 @@ pub fn default_install_directory(scope: InstallScope) -> io::Result<PathBuf> {
 }
 
 /// Reads the embedded payload index without extracting any files.
+pub fn installer_ready() -> bool {
+    !super::UNINSTALL_ONLY && !uninstaller_bytes().is_empty() && inspect_payload().is_ok()
+}
+
+pub fn update_eligibility(record: &InstallRecord) -> super::version::UpdateEligibility {
+    super::version::check(record.version.as_deref(), env!("CARGO_PKG_VERSION"))
+}
+
+pub fn ensure_update_allowed(options: &InstallOptions) -> io::Result<()> {
+    if super::UNINSTALL_ONLY {
+        return Err(io::Error::other("卸载程序不支持安装或更新。"));
+    }
+    let current = find_install();
+    if !options.update {
+        if current.is_some() {
+            return Err(io::Error::other("安装记录已变更，请重新打开新版安装程序。"));
+        }
+        return Ok(());
+    }
+    let record = current.ok_or_else(|| io::Error::other("安装记录已变更，请重新打开安装程序。"))?;
+    if record.scope != options.scope
+        || !equal_path(&record.install_directory, &options.install_directory)
+    {
+        return Err(io::Error::other("更新位置已改变，请重新打开安装程序。"));
+    }
+    let eligibility = update_eligibility(&record);
+    if !eligibility.allowed {
+        return Err(io::Error::other(eligibility.message));
+    }
+    Ok(())
+}
+
 pub fn inspect_payload() -> zip::result::ZipResult<PayloadInfo> {
-    let mut archive = ZipArchive::new(Cursor::new(EMBEDDED_PAYLOAD))?;
+    let mut archive = ZipArchive::new(Cursor::new(payload_bytes()))?;
     let mut files = 0usize;
     let mut bytes = 0u64;
     let mut has_dock = false;
@@ -175,6 +225,9 @@ pub fn check_environment() -> Vec<PreflightCheck> {
         },
         passed: os_ok,
     }];
+    if super::UNINSTALL_ONLY {
+        return checks;
+    }
     match inspect_payload() {
         Ok(payload) => checks.push(PreflightCheck {
             name: "安装文件",
@@ -194,6 +247,13 @@ pub fn check_environment() -> Vec<PreflightCheck> {
             },
             passed: false,
         }),
+    }
+    if uninstaller_bytes().is_empty() {
+        checks.push(PreflightCheck {
+            name: "卸载程序",
+            message: "此构建未包含卸载程序，请使用正式打包脚本生成安装包。".into(),
+            passed: false,
+        });
     }
     checks
 }
@@ -379,7 +439,25 @@ pub fn verify_registered(record: &InstallRecord) -> io::Result<PathBuf> {
     Ok(directory)
 }
 
+pub fn verify_uninstall_target(record: &InstallRecord) -> io::Result<PathBuf> {
+    let directory = validate_install_directory(&record.install_directory, true)?;
+    if let Some(found) = registered_install(record.scope) {
+        if equal_path(&directory, &found.install_directory) {
+            return Ok(directory);
+        }
+    } else if !directory.try_exists()? {
+        // A repeat request after successful cleanup is already complete. Never
+        // accept an unregistered directory that could now contain unrelated files.
+        return Ok(directory);
+    }
+    Err(io::Error::other("安装记录已变更。请关闭向导后重试。"))
+}
+
 fn registry_root(scope: InstallScope) -> windows::Win32::System::Registry::HKEY {
+    #[cfg(all(test, not(glide_uninstaller)))]
+    if let Some(root) = flow_tests::registry_override(scope) {
+        return root;
+    }
     match scope {
         InstallScope::CurrentUser => HKEY_CURRENT_USER,
         InstallScope::AllUsers => HKEY_LOCAL_MACHINE,
@@ -390,6 +468,7 @@ pub fn resolve_install_target(options: &InstallOptions) -> io::Result<PathBuf> {
     if options.update {
         return verify_registered(&InstallRecord {
             scope: options.scope,
+            version: None,
             install_directory: options.install_directory.clone(),
         });
     }
@@ -416,7 +495,6 @@ fn operation_lock() -> io::Result<dock_platform_windows::SingleInstance> {
 /// Transactionally extracts and registers the application.
 pub fn install(
     options: &InstallOptions,
-    setup_executable: &Path,
     mut report: impl FnMut(InstallProgress),
 ) -> io::Result<InstallRecord> {
     let _operation = operation_lock()?;
@@ -431,7 +509,16 @@ pub fn install(
             "全用户安装需要管理员权限。",
         ));
     }
+    ensure_update_allowed(options)?;
+    if uninstaller_bytes().is_empty() {
+        return Err(io::Error::other("安装包未包含卸载程序。"));
+    }
     let directory = resolve_install_target(options)?;
+    if super::elevation::is_inside(&std::env::current_exe()?, &directory) {
+        return Err(io::Error::other(
+            "请从“下载”文件夹或临时目录运行新版安装包。",
+        ));
+    }
     validate_capacity(&directory)?;
     let parent = directory
         .parent()
@@ -451,13 +538,13 @@ pub fn install(
         });
         fs::create_dir(&stage)?;
         extract_payload(&stage, &mut report)?;
-        let installed_setup = stage.join(SETUP_EXE);
-        fs::copy(setup_executable, &installed_setup)?;
+        fs::write(stage.join(UNINSTALL_EXE), uninstaller_bytes())?;
         report(InstallProgress {
             percent: 83,
             message: "正在关闭 Glide-Dock…".into(),
         });
         request_dock_shutdown(&directory)?;
+        ensure_update_allowed(options)?;
         resolve_install_target(options)?;
         if directory.exists() {
             report(InstallProgress {
@@ -501,6 +588,7 @@ pub fn install(
     });
     Ok(InstallRecord {
         scope: options.scope,
+        version: Some(env!("CARGO_PKG_VERSION").into()),
         install_directory: directory,
     })
 }
@@ -509,7 +597,7 @@ pub fn install(
 pub fn uninstall(
     record: &InstallRecord,
     mut report: impl FnMut(InstallProgress),
-) -> io::Result<()> {
+) -> io::Result<Vec<String>> {
     let _operation = operation_lock()?;
     if record.scope == InstallScope::AllUsers && !dock_platform_windows::is_elevated() {
         return Err(io::Error::other("全用户卸载需要管理员权限。"));
@@ -518,7 +606,7 @@ pub fn uninstall(
         percent: 8,
         message: "正在验证卸载信息…".into(),
     });
-    let directory = verify_registered(record)?;
+    let directory = verify_uninstall_target(record)?;
     let root = registry_root(record.scope);
     let mut matching_keys = Vec::new();
     for key in [UNINSTALL_KEY, LEGACY_UNINSTALL_KEY] {
@@ -536,20 +624,24 @@ pub fn uninstall(
         percent: 52,
         message: "正在移除程序文件…".into(),
     });
-    remove_install_tree(&directory, parent)?;
+    let mut warnings = remove_uninstall_tree(&directory, parent)?;
     report(InstallProgress {
         percent: 78,
         message: "正在移除快捷方式…".into(),
     });
-    remove_shortcuts(record.scope)?;
+    if let Err(error) = remove_shortcuts(record.scope) {
+        warnings.push(format!("程序已卸载，但部分快捷方式未能清理：{error}"));
+    }
     report(InstallProgress {
         percent: 92,
         message: "正在清理卸载记录…".into(),
     });
     for key in matching_keys {
-        Key::delete(root, key)?;
+        if let Err(error) = Key::delete(root, key) {
+            warnings.push(format!("程序已卸载，但卸载记录未能清理：{error}"));
+        }
     }
-    Ok(())
+    Ok(warnings)
 }
 
 /// Creates a fresh config only when the current user's config does not exist.
@@ -702,7 +794,7 @@ fn collect_application_shortcuts(
 }
 
 fn extract_payload(destination: &Path, report: &mut impl FnMut(InstallProgress)) -> io::Result<()> {
-    let mut archive = ZipArchive::new(Cursor::new(EMBEDDED_PAYLOAD)).map_err(io::Error::other)?;
+    let mut archive = ZipArchive::new(Cursor::new(payload_bytes())).map_err(io::Error::other)?;
     let total = archive.file_names().count().max(1);
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(io::Error::other)?;
@@ -814,13 +906,10 @@ fn restore_registration(
 }
 
 fn write_registration(directory: &Path, scope: InstallScope) -> io::Result<()> {
-    let root = match scope {
-        InstallScope::CurrentUser => HKEY_CURRENT_USER,
-        InstallScope::AllUsers => HKEY_LOCAL_MACHINE,
-    };
+    let root = registry_root(scope);
     let key = Key::create(root, UNINSTALL_KEY)?;
     let exe = directory.join("glide-dock.exe");
-    let setup = directory.join(SETUP_EXE);
+    let setup = directory.join(UNINSTALL_EXE);
     key.set_text("DisplayName", PRODUCT)?;
     key.set_text("DisplayVersion", env!("CARGO_PKG_VERSION"))?;
     key.set_text("Publisher", "Glide-Dock contributors")?;
@@ -843,13 +932,13 @@ fn read_install(scope: InstallScope, key_path: &str) -> Option<InstallRecord> {
     let key = Key::open(registry_root(scope), key_path, KEY_QUERY_VALUE).ok()??;
     let path = key.text("InstallLocation").ok()??;
     let directory = PathBuf::from(path);
-    directory
-        .join("glide-dock.exe")
-        .is_file()
-        .then_some(InstallRecord {
-            scope,
-            install_directory: directory,
-        })
+    // A failed cleanup may already have removed the main executable. The registry
+    // remains authoritative until uninstall finishes, so these installs can resume.
+    Some(InstallRecord {
+        scope,
+        version: key.text("DisplayVersion").ok().flatten(),
+        install_directory: directory,
+    })
 }
 
 fn registration_matches(scope: InstallScope, key_path: &str, directory: &Path) -> io::Result<bool> {
@@ -885,6 +974,7 @@ fn create_shortcuts(directory: &Path, scope: InstallScope, desktop: bool) -> io:
 }
 
 fn remove_shortcuts(scope: InstallScope) -> io::Result<()> {
+    let mut errors = Vec::new();
     let folders = match scope {
         InstallScope::CurrentUser => [&FOLDERID_Programs, &FOLDERID_Desktop],
         InstallScope::AllUsers => [&FOLDERID_CommonPrograms, &FOLDERID_PublicDesktop],
@@ -893,19 +983,28 @@ fn remove_shortcuts(scope: InstallScope) -> io::Result<()> {
         let base = match known_folder(folder) {
             Ok(path) => path,
             Err(error) => {
-                tracing::warn!(%error, "could not locate a shortcut folder");
+                errors.push(error.to_string());
                 continue;
             }
         };
         let group = if index == 0 { base.join(PRODUCT) } else { base };
         for name in ["Glide-Dock.lnk", "Glide-Dock 设置.lnk"] {
-            let _ = fs::remove_file(group.join(name));
+            let path = group.join(name);
+            if let Err(error) = fs::remove_file(&path)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                errors.push(format!("{}：{error}", path.display()));
+            }
         }
         if index == 0 && fs::read_dir(&group).is_ok_and(|mut entries| entries.next().is_none()) {
             let _ = fs::remove_dir(group);
         }
     }
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::other(errors.join("；")))
+    }
 }
 
 fn create_shortcut(executable: &Path, icon: &Path, destination: &Path) -> io::Result<()> {
@@ -946,6 +1045,10 @@ fn executable_path(path: &[u16]) -> PathBuf {
 }
 
 fn known_folder(id: &GUID) -> io::Result<PathBuf> {
+    #[cfg(all(test, not(glide_uninstaller)))]
+    if let Some(path) = flow_tests::folder_override(id) {
+        return Ok(path);
+    }
     let path =
         unsafe { SHGetKnownFolderPath(id, windows::Win32::UI::Shell::KNOWN_FOLDER_FLAG(0), None) }
             .map_err(io::Error::other)?;
@@ -1025,8 +1128,10 @@ fn request_shutdown_window(hwnd: HWND) -> io::Result<()> {
 }
 
 fn remove_install_tree(directory: &Path, parent: &Path) -> io::Result<()> {
-    if !directory.exists() {
-        return Ok(());
+    match fs::symlink_metadata(directory) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+        Ok(_) => (),
     }
     let requested = local_path(directory)?;
     let expected_parent = local_path(parent)?;
@@ -1048,6 +1153,55 @@ fn remove_install_tree(directory: &Path, parent: &Path) -> io::Result<()> {
         ));
     }
     fs::remove_dir_all(requested)
+}
+
+fn remaining_install_files(directory: &Path) -> io::Result<bool> {
+    let metadata = match fs::symlink_metadata(directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+        return Ok(true);
+    }
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        // Do not follow junctions or symlinks while classifying a failed removal.
+        if !kind.is_dir()
+            || fs::symlink_metadata(entry.path())?.file_attributes()
+                & FILE_ATTRIBUTE_REPARSE_POINT.0
+                != 0
+            || remaining_install_files(&entry.path())?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn remove_uninstall_tree(directory: &Path, parent: &Path) -> io::Result<Vec<String>> {
+    for attempt in 0..10 {
+        match remove_install_tree(directory, parent) {
+            Ok(()) => return Ok(Vec::new()),
+            Err(error) => {
+                if matches!(remaining_install_files(directory), Ok(false)) {
+                    return Ok(vec![format!(
+                        "程序文件已移除，但空目录暂时无法删除：{}。关闭占用该目录的窗口后可手动删除。{error}",
+                        directory.display()
+                    )]);
+                }
+                if attempt == 9 || !matches!(error.raw_os_error(), Some(5 | 32 | 33 | 145)) {
+                    return Err(io::Error::other(format!(
+                        "仍有程序文件未能移除，卸载尚未完成：{}。已保留卸载记录，关闭占用程序后可直接重试。{error}",
+                        directory.display()
+                    )));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+        }
+    }
+    unreachable!()
 }
 
 fn unique_nanos() -> u128 {
@@ -1125,10 +1279,17 @@ mod tests {
 
     #[test]
     fn paths_outside_a_directory_are_rejected() {
-        let archive = zip::ZipArchive::new(Cursor::new(EMBEDDED_PAYLOAD));
-        if let Err(zip::result::ZipError::InvalidArchive(_)) = archive {
-            return;
-        }
-        assert!(archive.is_err());
+        assert!(!is_at_or_below(
+            Path::new(r"D:\Apps\Glide-Dock-other"),
+            Path::new(r"D:\Apps\Glide-Dock")
+        ));
+        assert!(is_at_or_below(
+            Path::new(r"D:\Apps\Glide-Dock\assets"),
+            Path::new(r"D:\Apps\Glide-Dock")
+        ));
     }
 }
+
+#[cfg(all(test, not(glide_uninstaller)))]
+#[path = "flow_tests.rs"]
+mod flow_tests;

@@ -7,7 +7,7 @@ import type { MockOptions } from './mock';
 async function open(page: Page, options: MockOptions = {}) {
   await page.addInitScript(setupMock, options);
   await page.goto('/');
-  await expect(page.locator('#version')).toHaveText('v0.4.2');
+  await expect(page.locator('#version')).toHaveText('v0.4.3');
 }
 async function preferences(page: Page) {
   await expect(page.locator('#primary-button')).toBeEnabled();
@@ -71,24 +71,26 @@ for (const colorScheme of ['light', 'dark'] as const) {
   }
 }
 
-test('caption controls use aligned 16px icons and compact 40x32px hit areas', async ({ page }) => {
+test('square window frame surrounds a single centered close button', async ({ page }) => {
   await open(page);
-  const geometry = await page.locator('.window-controls button').evaluateAll(buttons => buttons.map(button => {
+  await expect(page.locator('.setup-window')).toHaveCSS('border-radius', '0px');
+  await expect(page.locator('.setup-window')).toHaveCSS('border-width', '1px');
+  await expect(page.locator('.titlebar button')).toHaveCount(1);
+  const close = page.getByRole('button', { name: '关闭', exact: true });
+  const geometry = await close.evaluate(button => {
     const b = button.getBoundingClientRect();
     const i = button.querySelector('svg')!.getBoundingClientRect();
-    return { width: b.width, height: b.height, iconWidth: i.width, iconHeight: i.height, iconY: i.y + i.height / 2 };
-  }));
-  expect(geometry).toHaveLength(3);
-  for (const box of geometry) {
-    expect(box.width).toBe(40); expect(box.height).toBe(32); expect(box.iconWidth).toBe(16); expect(box.iconHeight).toBe(16);
-    expect(box.iconY).toBe(geometry[0].iconY);
-  }
-  await page.locator('#maximize-button').click();
-  await expect(page.locator('#maximize-button')).toHaveAttribute('aria-label', '还原');
-  await page.locator('#maximize-button').click();
-  await expect(page.locator('#maximize-button')).toHaveAttribute('aria-label', '最大化');
-  await page.locator('#minimize-button').click();
-  expect(await page.evaluate(() => (window as any).__calls.some((call: any) => call.command === 'window.minimize'))).toBe(true);
+    return {
+      size: [b.width, b.height], iconSize: [i.width, i.height],
+      centerOffset: [i.x + i.width / 2 - (b.x + b.width / 2), i.y + i.height / 2 - (b.y + b.height / 2)],
+    };
+  });
+  expect(geometry.size).toEqual([40, 32]);
+  expect(geometry.iconSize).toEqual([28, 28]);
+  expect(geometry.centerOffset).toEqual([0, 0]);
+  await expect(close).toHaveCSS('border-radius', '0px');
+  await close.click();
+  expect(await page.evaluate(() => (window as any).__calls.some((call: any) => call.command === 'window.close'))).toBe(true);
 });
 
 test('app search and selection preserve choices across wizard navigation', async ({ page }) => {
@@ -117,6 +119,44 @@ test('latest path validation wins and browsing supports Chinese paths', async ({
   await expect(page.locator('#install-path')).toHaveValue('D:\\我的应用\\Glide-Dock');
 });
 
+test('folder picker cancellation preserves the path and allows browsing again', async ({ page }) => {
+  await open(page, { browseResponses: [{ path: null, delay: 700 }, { path: 'D:\我的应用\Glide-Dock' }] });
+  await expect(page.locator('#primary-button')).toBeEnabled();
+  const originalPath = await page.locator('#install-path').inputValue();
+  await page.locator('#browse-button').click();
+  await expect(page.locator('#browse-button')).toBeDisabled();
+  await expect(page.locator('#browse-button')).toHaveAttribute('aria-busy', 'true');
+  await expect(page.locator('#primary-button')).toBeDisabled();
+  await page.locator('#browse-button').dispatchEvent('click');
+  expect(await page.evaluate(() => (window as any).__calls.filter((call: any) => call.command === 'browse_destination').length)).toBe(1);
+  await expect(page.locator('#close-button')).toBeEnabled();
+  await expect(page.locator('#browse-button')).toBeEnabled();
+  await expect(page.locator('#install-path')).toHaveValue(originalPath);
+  await expect(page.locator('#primary-button')).toBeEnabled();
+  await page.locator('#browse-button').click();
+  await expect(page.locator('#install-path')).toHaveValue('D:\我的应用\Glide-Dock');
+});
+
+test('folder picker errors preserve the path and permit a successful retry', async ({ page }) => {
+  await open(page, { browseResponses: [{ error: '无法打开文件夹选择器：测试错误' }, { path: 'D:\重试\Glide-Dock' }] });
+  const originalPath = await page.locator('#install-path').inputValue();
+  await page.locator('#browse-button').click();
+  await expect(page.getByText('无法打开文件夹选择器：测试错误', { exact: true })).toBeVisible();
+  await expect(page.locator('#install-path')).toHaveValue(originalPath);
+  await expect(page.locator('#browse-button')).toBeEnabled();
+  await page.locator('#browse-button').click();
+  await expect(page.locator('#install-path')).toHaveValue('D:\重试\Glide-Dock');
+  await expect(page.locator('#primary-button')).toBeEnabled();
+});
+
+test('a late folder selection preserves newer manual path edits', async ({ page }) => {
+  await open(page, { browseResponses: [{ path: 'D:\Old', delay: 500 }] });
+  await page.locator('#browse-button').click();
+  await page.locator('#install-path').fill('D:\Manual');
+  await expect(page.locator('#browse-button')).toBeEnabled();
+  await expect(page.locator('#install-path')).toHaveValue('D:\Manual');
+});
+
 test('scope default lookup does not overwrite a newer manually entered path', async ({ page }) => {
   await open(page, { scopeDelay: 350 });
   await page.getByRole('radio', { name: /为所有用户安装/ }).check();
@@ -133,17 +173,29 @@ for (const options of [{ missingPayload: true }, { failedCheck: true }]) {
   });
 }
 
-test('long initialization error remains readable in a scrolling main area', async ({ page }) => {
+test('long initialization error remains reachable without a visible scrollbar', async ({ page }) => {
   await page.setViewportSize({ width: 560, height: 400 });
   await page.addInitScript(setupMock, { setupError: true }); await page.goto('/');
   await expect(page.getByRole('heading', { name: '暂时无法继续' })).toBeVisible();
   await expect(page.getByText(/无法读取安装信息：/)).toBeVisible();
+  const content = page.locator('#main-content');
+  await expect(content).toHaveCSS('scrollbar-width', 'none');
+  expect(await content.evaluate(el => el.offsetWidth - el.clientWidth)).toBe(0);
+  await content.hover({ position: { x: 16, y: 16 } });
+  await page.mouse.wheel(0, 120);
+  await expect.poll(() => content.evaluate(el => el.scrollTop)).toBeGreaterThan(0);
+  await content.focus();
+  await page.keyboard.press('Home');
+  await expect(content).toHaveJSProperty('scrollTop', 0);
+  await page.keyboard.press('PageDown');
+  await expect.poll(() => content.evaluate(el => el.scrollTop)).toBeGreaterThan(0);
+  await page.keyboard.press('End');
+  await expect(page.getByRole('button', { name: '重新检查' })).toBeInViewport();
   await layout(page);
 });
 
 test('uninstall confirmation traps focus, cancels on Escape, and keeps data by default', async ({ page }) => {
-  await open(page, { mode: 'manage' });
-  await page.locator('#manage-uninstall').click();
+  await open(page, { mode: 'uninstall' });
   await expect(page.getByRole('dialog')).toBeVisible();
   await expect(page.getByRole('checkbox', { name: /同时删除/ })).not.toBeChecked();
   for (let index = 0; index < 6; index++) {
@@ -156,7 +208,7 @@ test('uninstall confirmation traps focus, cancels on Escape, and keeps data by d
 });
 
 test('update preserves settings and sends only the update operation', async ({ page }) => {
-  await open(page, { mode: 'manage' }); await page.locator('#manage-update').click();
+  await open(page, { mode: 'update' });
   await expect(page.getByRole('heading', { name: '准备更新' })).toBeVisible();
   await expect(page.locator('#install-steps')).toHaveCount(0);
   await expect(page.locator('#primary-button')).toBeEnabled(); await page.locator('#primary-button').click();
@@ -216,4 +268,122 @@ test('confirmed uninstall preserves personal data unless explicitly selected', a
   await expect(page.getByRole('heading', { name: '卸载已完成' })).toBeVisible();
   const call = await page.evaluate(() => (window as any).__calls.find((call: any) => call.command === 'start_uninstall'));
   expect(call.args.deletePersonalData).toBe(false);
+});
+
+for (const colorScheme of ['light', 'dark'] as const) {
+  test(colorScheme + ' close hover changes only the titlebar', async ({ page }) => {
+    await page.emulateMedia({ colorScheme });
+    await open(page, { mode: 'update' });
+    const close = page.getByRole('button', { name: '关闭', exact: true });
+    const icon = close.locator('svg');
+    const normal = colorScheme === 'dark' ? 'rgb(170, 166, 182)' : 'rgb(141, 139, 155)';
+    const hovered = colorScheme === 'dark' ? 'rgb(238, 235, 245)' : 'rgb(95, 89, 110)';
+    const summary = page.locator('.summary-card');
+    await expect(summary).toBeVisible();
+    await expect(icon).toHaveCSS('color', normal);
+    const before = await summary.screenshot({ animations: 'disabled' });
+    await close.hover();
+    await expect(icon).toHaveCSS('color', hovered);
+    await expect(page.getByRole('tooltip')).toHaveCount(0);
+    const during = await summary.screenshot({ animations: 'disabled' });
+    expect(during.equals(before), 'close hover must not cover or repaint the page').toBe(true);
+    await page.mouse.move(20, 100);
+    await expect(icon).toHaveCSS('color', normal);
+  });
+}
+
+test('rounded cards keep their outlines aligned with the surface', async ({ page }) => {
+  await open(page);
+  await preferences(page);
+  for (const selector of ['.preference-settings', '.summary-card']) {
+    const card = page.locator(selector);
+    await expect(card).toBeVisible();
+    const radii = await card.evaluate(element => ({ surface: getComputedStyle(element).borderRadius, outline: getComputedStyle(element, '::after').borderRadius }));
+    expect(parseFloat(radii.surface)).toBeGreaterThan(0);
+    expect(radii.outline).toBe(radii.surface);
+    if (selector === '.preference-settings') await page.locator('#primary-button').click();
+  }
+});
+
+test('right click suppresses browser menus and keeps path editing available', async ({ page }) => {
+  await open(page);
+  await page.evaluate(() => {
+    (window as any).__contextMenus = [];
+    document.addEventListener('contextmenu', event => (window as any).__contextMenus.push(event.defaultPrevented));
+  });
+  await page.locator('#main-content').click({ button: 'right', position: { x: 12, y: 12 } });
+  await page.locator('#install-path').click({ button: 'right' });
+  await page.locator('#close-button').click({ button: 'right' });
+  expect(await page.evaluate(() => (window as any).__contextMenus)).toEqual([true, true, true]);
+  await page.locator('#install-path').focus();
+  await page.keyboard.press('Control+A');
+  await page.keyboard.insertText('D:\\Apps\\Glide-Dock');
+  await expect(page.locator('#install-path')).toHaveValue('D:\\Apps\\Glide-Dock');
+});
+
+test('refresh shortcuts preserve installation inputs and the current step', async ({ page }) => {
+  await open(page);
+  await page.evaluate(() => {
+    const prevented: boolean[] = [];
+    (window as any).__refreshPrevented = prevented;
+    document.addEventListener('keydown', event => {
+      if (event.key === 'F5' || event.key.toLowerCase() === 'r') prevented.push(event.defaultPrevented);
+    });
+  });
+  const path = page.locator('#install-path');
+  await path.fill('D:\\Apps\\Glide-Dock');
+  for (const shortcut of ['F5', 'Control+F5', 'Control+r', 'Control+Shift+R']) {
+    await page.keyboard.press(shortcut);
+    await expect(path).toHaveValue('D:\\Apps\\Glide-Dock');
+  }
+  await preferences(page);
+  await page.keyboard.press('F5');
+  await expect(page.locator('#setup-page')).toBeVisible();
+  expect(await page.evaluate(() => (window as any).__refreshPrevented)).toEqual([true, true, true, true, true]);
+});
+
+for (const [blocked, title] of [['same', '已安装此版本'], ['older', '安装包版本较旧'], ['unknown', '无法判断已安装版本']] as const) {
+  test('blocks update for ' + blocked + ' installed version', async ({ page }) => {
+    await open(page, { mode: 'update', updateBlocked: blocked });
+    await expect(page.getByRole('heading', { name: title })).toBeVisible();
+    await expect(page.locator('#primary-button')).toBeDisabled();
+    await expect(page.getByText('安装包版本', { exact: true })).toBeVisible();
+    await page.waitForTimeout(300);
+    expect(await page.evaluate(() => (window as any).__calls.some((call: any) => call.command === 'start_install'))).toBe(false);
+    await expect(page.getByText(/卸载请使用/).first()).toBeVisible();
+  });
+}
+
+test('standalone uninstaller exposes no update or installation controls', async ({ page }) => {
+  await open(page, { mode: 'uninstall', missingPayload: true });
+  await page.keyboard.press('Escape');
+  await expect(page).toHaveTitle('Glide-Dock 卸载程序');
+  await expect(page.locator('#uninstall-view')).toBeVisible();
+  await expect(page.locator('#manage-update')).toHaveCount(0);
+  await expect(page.getByText('安装环境', { exact: true })).toHaveCount(0);
+  await expect(page.getByText(/此构建未包含安装文件/)).toHaveCount(0);
+  await expect(page.locator('#install-steps')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).__calls.some((call: any) => ['start_install', 'check_destination', 'browse_destination'].includes(call.command)))).toBe(false);
+});
+
+
+test('uninstall cleanup warnings finish successfully and do not offer a misleading retry', async ({ page }) => {
+  await open(page, { mode: 'uninstall', cleanupWarning: true });
+  await page.locator('#confirm-uninstall').click();
+  await expect(page.getByRole('heading', { name: '卸载已完成' })).toBeVisible();
+  await expect(page.locator('#primary-button')).toHaveText('关闭');
+  await expect(page.locator('.feedback-details')).toContainText('空目录暂时无法删除');
+  await expect(page.getByRole('button', { name: '重试卸载' })).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).__calls.filter((call: any) => call.command === 'start_uninstall').length)).toBe(1);
+});
+
+test('a partial uninstall can be retried in the same window', async ({ page }) => {
+  await open(page, { mode: 'uninstall', failedOperation: true });
+  await page.locator('#confirm-uninstall').click();
+  await expect(page.locator('#primary-button')).toHaveText('重试卸载');
+  await page.evaluate(() => { (window as any).__failedOperation = false; });
+  await page.locator('#primary-button').click();
+  await page.locator('#confirm-uninstall').click();
+  await expect(page.getByRole('heading', { name: '卸载已完成' })).toBeVisible();
+  expect(await page.evaluate(() => (window as any).__calls.filter((call: any) => call.command === 'start_uninstall').length)).toBe(2);
 });

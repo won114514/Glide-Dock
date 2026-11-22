@@ -350,14 +350,38 @@ pub fn draw_scaled_tilted(
     if destination.width <= 0.0 || destination.height <= 0.0 || opacity <= 0.001 {
         return;
     }
+    let transform = bitmap_transform(
+        source.width(),
+        source.height(),
+        destination,
+        tilt_x_deg,
+        tilt_y_deg,
+    );
+    let paint = PixmapPaint {
+        opacity: opacity.clamp(0.0, 1.0),
+        blend_mode: BlendMode::SourceOver,
+        quality: FilterQuality::Bilinear,
+    };
+    pixmap.draw_pixmap(0, 0, source, &paint, transform, None);
+}
+
+/// Maps source pixel coordinates to the destination, including perspective tilt.
+#[must_use]
+pub fn bitmap_transform(
+    source_width: u32,
+    source_height: u32,
+    destination: Rect,
+    tilt_x_deg: f32,
+    tilt_y_deg: f32,
+) -> Transform {
+    let source_width = source_width as f32;
+    let source_height = source_height as f32;
     if tilt_x_deg.abs() < 0.01 && tilt_y_deg.abs() < 0.01 {
-        draw_scaled(pixmap, source, destination, opacity);
-        return;
-    }
-    let source_width = source.width() as f32;
-    let source_height = source.height() as f32;
-    if source_width <= 0.0 || source_height <= 0.0 {
-        return;
+        return Transform::from_scale(
+            destination.width / source_width,
+            destination.height / source_height,
+        )
+        .post_translate(destination.x, destination.y);
     }
     let yaw = tilt_y_deg.to_radians();
     let pitch = tilt_x_deg.to_radians();
@@ -370,13 +394,7 @@ pub fn draw_scaled_tilted(
     let center = destination.center();
     let tx = center.x - a * source_width / 2.0 - b * source_height / 2.0;
     let ty = center.y - c * source_width / 2.0 - d * source_height / 2.0;
-    let transform = Transform::from_row(a, c, b, d, tx, ty);
-    let paint = PixmapPaint {
-        opacity: opacity.clamp(0.0, 1.0),
-        blend_mode: BlendMode::SourceOver,
-        quality: FilterQuality::Bilinear,
-    };
-    pixmap.draw_pixmap(0, 0, source, &paint, transform, None);
+    Transform::from_row(a, c, b, d, tx, ty)
 }
 
 /// Draws a soft, blurred shadow of a rounded rectangle.

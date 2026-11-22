@@ -1,0 +1,77 @@
+component CaptionGlyph inherits Path {
+    in property <color> foreground;
+    width: 16px;
+    height: 16px;
+    viewbox-width: 16;
+    viewbox-height: 16;
+    fill: transparent;
+    stroke: root.foreground;
+    stroke-width: 1px;
+    accessible-role: none;
+}
+
+component CaptionButton inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <color> foreground;
+    in property <bool> destructive: false;
+    callback clicked();
+    private property <color> icon-color: root.destructive && (touch.has-hover || touch.pressed) ? #ffffff : root.foreground;
+    width: 40px;
+    height: 32px;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    border-radius: 6px;
+    border-width: keyboard.has-focus ? 1px : 0px;
+    border-color: root.foreground.with-alpha(0.5);
+    background: touch.pressed ? (root.destructive ? #b5222a : root.foreground.with-alpha(0.12))
+        : touch.has-hover ? (root.destructive ? #c42b32 : root.foreground.with-alpha(0.07)) : transparent;
+    animate background { duration: 100ms; }
+    forward-focus: keyboard;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => { root.clicked(); }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 16px;
+        height: 16px;
+        background: transparent;
+        if root.icon == "minimize": CaptionGlyph { foreground: root.icon-color; commands: "M 3 8 H 13"; }
+        if root.icon == "maximize": CaptionGlyph { foreground: root.icon-color; commands: "M 3.5 3.5 H 12.5 V 12.5 H 3.5 Z"; }
+        if root.icon == "restore": CaptionGlyph { foreground: root.icon-color; commands: "M 5.5 5.5 V 2.5 H 13.5 V 10.5 H 10.5 M 2.5 5.5 H 10.5 V 13.5 H 2.5 Z"; }
+        if root.icon == "close": CaptionGlyph { foreground: root.icon-color; commands: "M 3.5 3.5 L 12.5 12.5 M 12.5 3.5 L 3.5 12.5"; }
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+    keyboard := FocusScope {
+        width: 0px;
+        key-pressed(event) => {
+            if event.text == Key.Space || event.text == Key.Return {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+
+export component WindowControls inherits Rectangle {
+    in property <color> foreground;
+    in property <bool> maximized;
+    callback minimize();
+    callback toggle-maximize();
+    callback close();
+    width: 140px;
+    height: 44px;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    background: transparent;
+    HorizontalLayout {
+        padding: 6px;
+        spacing: 4px;
+        CaptionButton { icon: "minimize"; label: "最小化"; foreground: root.foreground; clicked => { root.minimize(); } }
+        CaptionButton { icon: root.maximized ? "restore" : "maximize"; label: root.maximized ? "还原" : "最大化"; foreground: root.foreground; clicked => { root.toggle-maximize(); } }
+        CaptionButton { icon: "close"; label: "关闭设置"; foreground: root.foreground; destructive: true; clicked => { root.close(); } }
+    }
+}

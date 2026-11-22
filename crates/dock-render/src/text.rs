@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use tiny_skia::{Pixmap, PremultipliedColorU8};
 
 /// Font weight selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Weight {
     /// Regular text.
     Regular,

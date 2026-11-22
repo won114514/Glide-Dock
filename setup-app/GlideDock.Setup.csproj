@@ -25,8 +25,8 @@
              Link="Assets\Glide-Dock-Logo-Horizontal.png"
              CopyToOutputDirectory="PreserveNewest"
              CopyToPublishDirectory="PreserveNewest" />
-    <Content Include="..\assets\brand\04-Showcase\Glide-Dock-Dock-Preview.png"
-             Link="Assets\Glide-Dock-Dock-Preview.png"
+    <Content Include="..\assets\brand\04-Showcase\Glide-Dock-Brand-Preview.png"
+             Link="Assets\Glide-Dock-Brand-Preview.png"
              CopyToOutputDirectory="PreserveNewest"
              CopyToPublishDirectory="PreserveNewest" />
     <EmbeddedResource Include="$(PayloadArchive)"

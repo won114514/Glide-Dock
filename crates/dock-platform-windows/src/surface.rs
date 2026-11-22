@@ -3,12 +3,14 @@
 use std::ffi::c_void;
 use std::ptr;
 
-use windows::Win32::Foundation::{COLORREF, HWND, POINT, SIZE};
+use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, CreateCompatibleDC,
     CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, HBITMAP, HDC, HGDIOBJ, SelectObject,
 };
-use windows::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
+use windows::Win32::UI::WindowsAndMessaging::{
+    ULW_ALPHA, UPDATELAYEREDWINDOWINFO, UpdateLayeredWindow, UpdateLayeredWindowIndirect,
+};
 
 use crate::error::{PlatformError, Result};
 
@@ -21,6 +23,7 @@ pub struct LayeredSurface {
     bits: *mut u8,
     width: u32,
     height: u32,
+    input_mask_valid: bool,
 }
 
 // The surface is only used from the UI thread.
@@ -41,6 +44,7 @@ impl LayeredSurface {
             bits: ptr::null_mut(),
             width: 0,
             height: 0,
+            input_mask_valid: false,
         })
     }
 
@@ -93,6 +97,14 @@ impl LayeredSurface {
             )
         }
         .map_err(|error| PlatformError::win32(&error))?;
+        if bits.is_null() {
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            }
+            return Err(PlatformError::Win32(
+                "CreateDIBSection returned no pixels".into(),
+            ));
+        }
         let previous = unsafe { SelectObject(self.memory_dc, HGDIOBJ(bitmap.0)) };
         if previous.is_invalid() || previous.0 as isize == -1 {
             unsafe {
@@ -129,6 +141,7 @@ impl LayeredSurface {
             return Err(PlatformError::Win32("surface has no DIB bits".to_string()));
         }
 
+        self.input_mask_valid = false;
         // tiny-skia stores RGBA; a 32bpp Windows DIB expects BGRA.
         let destination = unsafe { std::slice::from_raw_parts_mut(self.bits, expected) };
         let (source_pixels, _) = rgba.as_chunks::<4>();
@@ -167,6 +180,60 @@ impl LayeredSurface {
         .map_err(|error| PlatformError::win32(&error))
     }
 
+    /// Updates the hit-test DIB beneath a DirectComposition visual. The edit
+    /// returns the dirty bounds, or `None` when no pixels changed.
+    /// It receives `true` when the DIB was cleared and the entire mask must be
+    /// rebuilt, including after a CPU frame overwrote it at the same size.
+    pub fn update_input_mask(
+        &mut self,
+        width: u32,
+        height: u32,
+        edit: impl FnOnce(&mut [u32], bool) -> Option<RECT>,
+    ) -> Result<()> {
+        self.resize(width, height)?;
+        let rebuild = !self.input_mask_valid;
+        let len = self.width as usize * self.height as usize;
+        // 32bpp DIB scanlines are DWORD-aligned and have no extra padding.
+        let pixels = unsafe { std::slice::from_raw_parts_mut(self.bits.cast::<u32>(), len) };
+        if rebuild {
+            pixels.fill(0);
+        }
+        let changed = edit(pixels, rebuild);
+        if !rebuild && changed.is_none() {
+            return Ok(());
+        }
+        let size = SIZE {
+            cx: self.width as i32,
+            cy: self.height as i32,
+        };
+        let src = POINT::default();
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+            ..Default::default()
+        };
+        let info = UPDATELAYEREDWINDOWINFO {
+            cbSize: std::mem::size_of::<UPDATELAYEREDWINDOWINFO>() as u32,
+            psize: &size,
+            hdcSrc: self.memory_dc,
+            pptSrc: &src,
+            pblend: &blend,
+            dwFlags: ULW_ALPHA,
+            prcDirty: if rebuild {
+                ptr::null()
+            } else {
+                changed.as_ref().map_or(ptr::null(), ptr::from_ref)
+            },
+            ..Default::default()
+        };
+        let result = unsafe { UpdateLayeredWindowIndirect(self.hwnd, &info) }
+            .ok()
+            .map_err(|error| PlatformError::win32(&error));
+        self.input_mask_valid = result.is_ok();
+        result
+    }
+
     fn release_bitmap(&mut self) {
         if let Some(bitmap) = self.bitmap.take() {
             if !self.previous_bitmap.is_invalid() {
@@ -182,6 +249,7 @@ impl LayeredSurface {
         self.bits = ptr::null_mut();
         self.width = 0;
         self.height = 0;
+        self.input_mask_valid = false;
     }
 }
 

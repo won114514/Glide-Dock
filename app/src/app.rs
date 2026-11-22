@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::ffi::c_void;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 use dock_core::events::DockCommand;
@@ -13,22 +14,23 @@ use dock_core::state::{DragSession, MenuAction, MenuEntry, MenuIcon, MenuTarget}
 use dock_core::theme::{Palette, ResolvedTheme, ThemeMode};
 use dock_core::{DockState, MotionEngine, MotionSnapshot, MotionTuning};
 use dock_platform_windows::{
-    DropPayload, GlassBackdrop, IconImage, IconService, LayeredSurface, PlatformError,
-    ResolveService, ResolvedEntry, StoreAppService, TrayEvent, TrayIcon, WM_APP_LAUNCH_RESULT,
-    WM_APP_STORE_APPS, WM_APP_WINDOW_EVENT, WM_ICON_READY, WM_PATHS_RESOLVED, WindowTracker,
-    accept_files, animations_enabled, capture_mouse, create_layered_popup, cursor_position,
-    is_low_integrity, metrics_for_window, open_path, open_start_menu, parse_drop, pick_store_app,
-    place_above_desktop, place_dock, prefers_light_theme, register_class, release_mouse, reveal,
-    screen_to_client, set_bounds, set_topmost, show_no_activate, visible_window_paths,
-    windows_build,
+    DropPayload, GlassBackdrop, IconImage, IconService, LayeredSurface, MonitorMetrics,
+    PlatformError, ResolveService, ResolvedEntry, StoreAppService, TrayEvent, TrayIcon,
+    WM_APP_LAUNCH_RESULT, WM_APP_STORE_APPS, WM_APP_WINDOW_EVENT, WM_ICON_READY, WM_PATHS_RESOLVED,
+    WindowTracker, accept_files, animations_enabled, capture_mouse, create_layered_popup,
+    cursor_position, is_low_integrity, metrics_for_window, open_path, open_start_menu, parse_drop,
+    pick_store_app, place_above_desktop, place_dock, prefers_light_theme, register_class,
+    release_mouse, reveal, screen_to_client, set_bounds, set_topmost, show_no_activate,
+    visible_window_paths, windows_build,
 };
 use dock_render::icons::IconMap;
 use dock_render::{
-    DockScene, DragVisual, IconAnimation, MenuLayout, MenuScene, Renderer, StartMenuStyle,
+    DockFrame, DockScene, DragVisual, HitShape, IconAnimation, MenuLayout, MenuOverlay, MenuScene,
+    Renderer, StartMenuStyle,
 };
 use dock_storage::{ConfigStore, LoadOutcome, StorageError};
 use tiny_skia::{FilterQuality, IntSize, Pixmap, PixmapPaint, Transform};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
@@ -36,26 +38,28 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::HDROP;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetForegroundWindow, GetSystemMetrics, HTCLIENT,
-    HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOPMOST, KillTimer, MA_NOACTIVATE, PostQuitMessage,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_APP,
-    WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_DROPFILES,
+    DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetForegroundWindow, GetSystemMetrics,
+    GetWindowLongPtrW, HTCLIENT, HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOPMOST, KillTimer,
+    MA_NOACTIVATE, PostQuitMessage, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_DROPFILES,
     WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST,
     WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
 };
 
 use crate::launcher::LauncherService;
-use crate::render_loop::{FrameClock, frame_interval_ms};
+use crate::presenter::{DockPresenter, Submission};
+use crate::render_loop::{FrameScheduler, TIMER_FRAME};
 use crate::wndproc::dock_wndproc;
+mod frame_stats;
 mod settings;
+use frame_stats::FrameStats;
 use settings::{SettingsHost, SettingsValues, WM_APP_SETTINGS_COMMAND};
 
 /// Mouse leave notification (defined in Win32::UI::Controls).
 const WM_MOUSELEAVE: u32 = 0x02A3;
 pub const WM_APP_OPEN_SETTINGS: u32 = WM_APP + 8;
 
-const TIMER_FRAME: usize = 1;
 const TIMER_TOOLTIP: usize = 2;
 const TIMER_SAVE: usize = 3;
 const TIMER_ERROR: usize = 4;
@@ -91,27 +95,29 @@ struct MenuView {
     entries: Vec<MenuEntry>,
     layout: MenuLayout,
     position: Point,
-    pixmap: Pixmap,
+    pixmap: Arc<Pixmap>,
+    displayed: Option<Point>,
     hovered: Option<usize>,
     closing: bool,
 }
 
 impl MenuView {
-    fn bubble(&self) -> Rect {
-        self.layout
-            .bubble
-            .translate(self.position.x, self.position.y)
-    }
-
     fn hit(&self, point: Point) -> Option<usize> {
         if self.closing {
             return None;
         }
-        self.layout.hit(point - self.position)
+        self.layout.hit(point - self.displayed?)
     }
 
     fn contains(&self, point: Point) -> bool {
-        !self.closing && self.bubble().contains(point)
+        !self.closing
+            && self.displayed.is_some_and(|position| {
+                HitShape {
+                    rect: self.layout.bubble.translate(position.x, position.y),
+                    radius: self.layout.radius,
+                }
+                .contains(point)
+            })
     }
 }
 
@@ -144,7 +150,7 @@ struct TrayMenuView {
 }
 
 impl TrayMenuView {
-    fn create(app: *mut DockApp, dpi_scale: f32) -> Result<Self, Box<dyn std::error::Error>> {
+    fn create(owner: HWND, dpi_scale: f32) -> Result<Self, Box<dyn std::error::Error>> {
         let scale = dpi_scale.max(0.5);
         let instance = register_class(TRAY_MENU_CLASS, Some(dock_wndproc))?;
         let width = ((unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) }.max(1) as f32) * scale)
@@ -158,7 +164,7 @@ impl TrayMenuView {
         let hwnd =
             create_layered_popup(instance, TRAY_MENU_CLASS, "Glide-Dock 菜单", width, height)?;
         unsafe {
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, app as isize);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, GetWindowLongPtrW(owner, GWLP_USERDATA));
         }
         let surface = LayeredSurface::new(hwnd)?;
         let canvas = Pixmap::new(width, height).ok_or_else(|| {
@@ -225,7 +231,8 @@ impl Drop for TrayMenuView {
 /// The complete dock application.
 pub struct DockApp {
     hwnd: HWND,
-    surface: LayeredSurface,
+    presenter: DockPresenter,
+    hit_shapes: Vec<HitShape>,
     renderer: Renderer,
     store: ConfigStore,
     config: DockConfig,
@@ -245,11 +252,9 @@ pub struct DockApp {
     icon_service: IconService,
     icon_generation: u64,
     resolve_service: ResolveService,
-    dpi_scale: f32,
-    refresh_hz: u32,
-    frame_interval_ms: u32,
-    clock: FrameClock,
-    frame_timer: bool,
+    monitor: MonitorMetrics,
+    frames: FrameScheduler,
+    frame_stats: Option<FrameStats>,
     tooltip_timer: bool,
     save_timer: bool,
     error_timer: bool,
@@ -299,8 +304,6 @@ impl DockApp {
         let config = outcome.config;
         let monitor = metrics_for_window(hwnd);
         let dpi_scale = monitor.dpi_scale;
-        let refresh_hz = monitor.refresh_hz;
-        let frame_interval_ms = frame_interval_ms(refresh_hz);
         let theme = resolve_theme(config.appearance.theme);
         let palette = palette_for(&config, theme);
         let metrics = Metrics::new(
@@ -320,7 +323,7 @@ impl DockApp {
         ));
         let launcher = LauncherService::new(hwnd);
         let store_apps = StoreAppService::spawn(hwnd);
-        let surface = LayeredSurface::new(hwnd)?;
+        let presenter = DockPresenter::new(hwnd)?;
         let icon_service = IconService::spawn(hwnd);
         let resolve_service = ResolveService::spawn(hwnd);
         let window_tracker = WindowTracker::install(hwnd);
@@ -334,7 +337,8 @@ impl DockApp {
 
         let mut app = Self {
             hwnd,
-            surface,
+            presenter,
+            hit_shapes: Vec::new(),
             renderer,
             store,
             config,
@@ -354,11 +358,9 @@ impl DockApp {
             icon_service,
             icon_generation: 0,
             resolve_service,
-            dpi_scale,
-            refresh_hz,
-            frame_interval_ms,
-            clock: FrameClock::new(),
-            frame_timer: false,
+            monitor,
+            frames: FrameScheduler::new(hwnd, monitor.refresh_hz),
+            frame_stats: FrameStats::from_env(),
             tooltip_timer: false,
             save_timer: false,
             error_timer: false,
@@ -404,15 +406,12 @@ impl DockApp {
                 );
             }
         }
-        app.render();
         if show {
             show_no_activate(hwnd);
             app.window_visible = true;
             app.ensure_native_glass();
             app.apply_dock_layer();
-            // Present once more after the window is shown; some compositions
-            // ignore the pre-show layered content until the next update.
-            app.render();
+            app.on_frame();
         }
         accept_files(hwnd);
         if show {
@@ -490,10 +489,12 @@ impl DockApp {
                 LRESULT(0)
             }
             WM_CAPTURECHANGED => {
-                self.cancel_pressed_interactions();
-                self.state.drag = None;
-                self.state.pressed = None;
-                self.render();
+                // Releasing capture on a normal mouse-up is synchronous. The
+                // drag has already been taken and the click should complete.
+                if self.state.drag.take().is_some() || self.state.pressed.is_some() {
+                    self.cancel_pressed_interactions();
+                    self.state.pressed = None;
+                }
                 LRESULT(0)
             }
             WM_DROPFILES => {
@@ -519,16 +520,6 @@ impl DockApp {
             }
             WM_NCHITTEST => LRESULT(self.hit_test(lparam) as isize),
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
-            WM_DPICHANGED => {
-                self.relayout_window(self.window_visible);
-                self.render();
-                LRESULT(0)
-            }
-            WM_DISPLAYCHANGE => {
-                self.relayout_window(self.window_visible);
-                self.render();
-                LRESULT(0)
-            }
             WM_SETTINGCHANGE => {
                 self.system_animations = animations_enabled();
                 self.apply_motion_config();
@@ -543,6 +534,9 @@ impl DockApp {
                 unsafe {
                     let _ = BeginPaint(hwnd, &mut paint);
                     let _ = EndPaint(hwnd, &paint);
+                }
+                if self.presenter.recover_on_paint() {
+                    self.animate();
                 }
                 LRESULT(0)
             }
@@ -563,10 +557,7 @@ impl DockApp {
                 LRESULT(0)
             }
             WM_CLOSE => {
-                self.shutdown();
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                }
+                self.quit();
                 LRESULT(0)
             }
             WM_DESTROY => {
@@ -597,17 +588,20 @@ impl DockApp {
             }
             DockLayer::Topmost => true,
         };
-        if topmost == self.layer_topmost {
-            return;
-        }
-        if topmost {
-            set_topmost(self.hwnd);
-        } else {
-            place_above_desktop(self.hwnd);
-        }
-        self.layer_topmost = topmost;
-        if let Some(glass) = &self.glass {
+        if topmost != self.layer_topmost {
             if topmost {
+                set_topmost(self.hwnd);
+            } else {
+                place_above_desktop(self.hwnd);
+            }
+            self.layer_topmost = topmost;
+            self.place_glass_below_dock();
+        }
+    }
+
+    fn place_glass_below_dock(&self) {
+        if let Some(glass) = &self.glass {
+            if self.layer_topmost {
                 set_topmost(glass.hwnd());
             } else {
                 place_above_desktop(glass.hwnd());
@@ -640,14 +634,6 @@ impl DockApp {
     }
 
     fn hit_icon(&self, point: Point) -> Option<usize> {
-        for (index, item) in self.config.items.iter().enumerate() {
-            if item.kind == ItemKind::Separator
-                && let Some(rect) = self.geometry.slot_rects().get(index)
-                && rect.contains(point)
-            {
-                return Some(index);
-            }
-        }
         self.layout.hit_icon(point)
     }
 
@@ -668,7 +654,7 @@ impl DockApp {
         if let Some(mut drag) = self.state.drag.take() {
             drag.cursor = point;
             if !drag.active {
-                let threshold = DRAG_THRESHOLD_DIP * self.dpi_scale;
+                let threshold = DRAG_THRESHOLD_DIP * self.monitor.dpi_scale;
                 if drag.origin.distance(point) > threshold {
                     drag.active = true;
                     self.state.hovered = None;
@@ -688,7 +674,7 @@ impl DockApp {
                     .collect();
                 drag.insertion = insertion_index(&remaining, point.x);
                 self.state.drag = Some(drag);
-                self.render();
+                self.animate();
                 return;
             }
             self.state.drag = Some(drag);
@@ -712,7 +698,12 @@ impl DockApp {
     }
 
     fn track_mouse_leave(&mut self) {
-        if self.mouse_tracked {
+        if self.mouse_tracked
+            || self
+                .frame_stats
+                .as_ref()
+                .is_some_and(FrameStats::uses_posted_pointer)
+        {
             return;
         }
         let mut event = TRACKMOUSEEVENT {
@@ -805,7 +796,8 @@ impl DockApp {
         release_mouse();
 
         if drag.active {
-            let remove_threshold = self.layout.dock.top() - DRAG_REMOVE_GAP_DIP * self.dpi_scale;
+            let remove_threshold =
+                self.layout.dock.top() - DRAG_REMOVE_GAP_DIP * self.monitor.dpi_scale;
             if point.y < remove_threshold {
                 self.dispatch(DockCommand::RemoveItem { id: drag.item_id });
                 self.state.hovered = None;
@@ -830,7 +822,6 @@ impl DockApp {
             self.state.hovered = None;
             self.state.tooltip.index = None;
             self.animate();
-            self.render();
         } else if self.layout.hit_icon(point) == Some(drag.from) {
             self.motion.pointer_up(self.now(), drag.item_id);
             self.dispatch(DockCommand::Activate { id: drag.item_id });
@@ -847,8 +838,11 @@ impl DockApp {
                 .get(index)
                 .map(|item| MenuTarget::Item(item.id));
         }
-        let margin = 6.0 * self.dpi_scale;
-        if self.layout.dock.inset(-margin).contains(point) {
+        if self
+            .hit_shapes
+            .first()
+            .is_some_and(|shape| shape.contains(point))
+        {
             Some(MenuTarget::Background)
         } else {
             None
@@ -929,7 +923,7 @@ impl DockApp {
             self.close_menu_immediately();
         }
         let entries = self.build_menu_entries(target);
-        let layout = self.renderer.menu_layout(&entries, self.dpi_scale);
+        let layout = self.renderer.menu_layout(&entries, self.monitor.dpi_scale);
         let Some(frame) = self.renderer.render_menu(&MenuScene {
             entries: &entries,
             layout: &layout,
@@ -950,8 +944,8 @@ impl DockApp {
             MenuTarget::Background => point.x,
         };
         let anchor_bottom = match target {
-            MenuTarget::Item(_) => self.layout.dock.top() - 8.0 * self.dpi_scale,
-            MenuTarget::Background => point.y - 4.0 * self.dpi_scale,
+            MenuTarget::Item(_) => self.layout.dock.top() - 8.0 * self.monitor.dpi_scale,
+            MenuTarget::Background => point.y - 4.0 * self.monitor.dpi_scale,
         };
 
         let window = self.geometry.window;
@@ -966,7 +960,8 @@ impl DockApp {
             entries,
             layout: frame.layout,
             position,
-            pixmap: frame.pixmap,
+            pixmap: Arc::new(frame.pixmap),
+            displayed: None,
             hovered: None,
             closing: false,
         });
@@ -996,7 +991,6 @@ impl DockApp {
         }
         self.apply_dock_layer();
         self.animate();
-        self.render();
     }
 
     fn update_menu_hover(&mut self, point: Point) {
@@ -1006,7 +1000,7 @@ impl DockApp {
         if menu.closing {
             return;
         }
-        let hovered = menu.layout.hit(point - menu.position);
+        let hovered = menu.hit(point);
         if hovered == menu.hovered {
             return;
         }
@@ -1021,10 +1015,10 @@ impl DockApp {
             return;
         };
         if let Some(menu) = self.menu.as_mut() {
-            menu.pixmap = frame.pixmap;
+            menu.pixmap = Arc::new(frame.pixmap);
             menu.hovered = hovered;
         }
-        self.render();
+        self.animate();
     }
 
     fn menu_hit(&self, point: Point) -> Option<usize> {
@@ -1185,7 +1179,7 @@ impl DockApp {
             }
             DockCommand::RefreshItems => {
                 self.request_all_icons();
-                self.render();
+                self.animate();
             }
             DockCommand::Shutdown => self.quit(),
         }
@@ -1280,7 +1274,6 @@ impl DockApp {
         self.mark_dirty();
         self.apply_dock_layer();
         self.animate();
-        self.render();
         tracing::info!(%id, "built-in dock item added");
     }
 
@@ -1327,7 +1320,6 @@ impl DockApp {
         }
         self.mark_dirty();
         self.animate();
-        self.render();
         tracing::info!(count = added.len(), "items added");
     }
 
@@ -1349,7 +1341,6 @@ impl DockApp {
         self.relayout_window(self.window_visible);
         self.mark_dirty();
         self.animate();
-        self.render();
         tracing::info!(id, "item removed");
     }
 
@@ -1376,7 +1367,6 @@ impl DockApp {
             .set_pointer(self.now(), self.state.cursor, self.state.hovered);
         self.mark_dirty();
         self.animate();
-        self.render();
     }
 
     fn activate(&mut self, id: u32) {
@@ -1412,7 +1402,7 @@ impl DockApp {
                     tracing::info!(id, "launcher accepted request");
                 }
                 Err(error) => {
-                    self.motion.launch_failed(self.now(), id);
+                    self.motion.launch_failed(self.now(), id, &self.metrics);
                     // A failed relaunch must not clear a dot for an app that is
                     // still running.
                     let still_running = self
@@ -1513,7 +1503,6 @@ impl DockApp {
                 self.relayout_window(self.window_visible);
                 self.request_all_icons();
                 self.animate();
-                self.render();
                 tracing::info!("configuration reloaded");
                 true
             }
@@ -1607,7 +1596,7 @@ impl DockApp {
 
     fn open_tray_menu(&mut self) {
         if self.tray_menu.is_none() {
-            match TrayMenuView::create(self as *mut DockApp, self.dpi_scale) {
+            match TrayMenuView::create(self.hwnd, self.monitor.dpi_scale) {
                 Ok(menu) => self.tray_menu = Some(menu),
                 Err(error) => {
                     tracing::warn!(%error, "could not create tray menu");
@@ -1623,12 +1612,12 @@ impl DockApp {
         };
         let origin = menu.origin;
         let entries = self.tray_root_entries();
-        let layout = menu.renderer.menu_layout(&entries, self.dpi_scale);
+        let layout = menu.renderer.menu_layout(&entries, self.monitor.dpi_scale);
         let local = Point::new(cursor.x as f32 - origin.x, cursor.y as f32 - origin.y);
         let bubble = layout.bubble;
         let mut position = Point::new(
             local.x - bubble.center().x,
-            local.y - bubble.height - 4.0 * self.dpi_scale,
+            local.y - bubble.height - 4.0 * self.monitor.dpi_scale,
         );
         let max_x = (menu.width as f32 - layout.window.width - 2.0).max(2.0);
         let max_y = (menu.height as f32 - layout.window.height - 2.0).max(2.0);
@@ -1668,7 +1657,7 @@ impl DockApp {
         let Some(menu) = self.tray_menu.as_mut() else {
             return;
         };
-        let layout = menu.renderer.menu_layout(&entries, self.dpi_scale);
+        let layout = menu.renderer.menu_layout(&entries, self.monitor.dpi_scale);
         let Some(row) = menu.layout.rows.iter().find(|row| row.entry == parent) else {
             return;
         };
@@ -1930,7 +1919,6 @@ impl DockApp {
         self.update_native_glass();
         self.mark_dirty();
         self.save_now();
-        self.render();
         self.animate();
     }
 
@@ -1942,7 +1930,7 @@ impl DockApp {
         self.apply_dock_layer();
         self.mark_dirty();
         self.save_now();
-        self.render();
+        self.animate();
     }
 
     fn open_settings(&mut self) {
@@ -1957,30 +1945,16 @@ impl DockApp {
         }
     }
 
-    fn quit(&mut self) {
-        self.shutdown();
-        unsafe {
-            let _ = DestroyWindow(self.hwnd);
-        }
+    fn quit(&self) {
+        unsafe { PostQuitMessage(0) };
     }
 
     /// Saves state and stops timers. Safe to call more than once.
     pub fn shutdown(&mut self) {
-        if self.shutdown_done {
-            return;
+        if !self.shutdown_done {
+            self.save_now();
+            self.shutdown_without_save();
         }
-        self.shutdown_done = true;
-        self.save_now();
-        self.kill_all_timers();
-        release_mouse();
-        self.settings.shutdown();
-        if let Some(mut tray) = self.tray.take() {
-            tray.remove();
-        }
-        self.tray_menu = None;
-        self.glass = None;
-        self.native_glass = false;
-        self.window_visible = false;
     }
 
     /// Stops timers without touching the user's configuration. Used by
@@ -1991,6 +1965,7 @@ impl DockApp {
         }
         self.shutdown_done = true;
         self.kill_all_timers();
+        self.presenter.detach();
         release_mouse();
         self.settings.shutdown();
         if let Some(mut tray) = self.tray.take() {
@@ -2004,16 +1979,38 @@ impl DockApp {
 
     // -------------------------------------------------------------- rendering
 
-    fn relayout_window(&mut self, show: bool) {
+    pub(crate) fn on_display_changed(&mut self) {
         let monitor = metrics_for_window(self.hwnd);
-        self.dpi_scale = monitor.dpi_scale;
-        self.refresh_hz = monitor.refresh_hz;
-        self.frame_interval_ms = frame_interval_ms(self.refresh_hz);
+        if monitor.work == self.monitor.work && monitor.dpi_scale == self.monitor.dpi_scale {
+            self.monitor = monitor;
+            self.frames.set_refresh_rate(monitor.refresh_hz);
+            return;
+        }
+
+        // Input state stores client pixels relative to the old geometry.
+        if self.state.drag.take().is_some() {
+            release_mouse();
+        }
+        self.on_mouse_leave();
+        if self.tray_menu.as_ref().is_some_and(|menu| menu.visible) {
+            self.close_tray_menu();
+        }
+        self.tray_menu = None;
+        self.relayout_for_monitor(monitor, self.window_visible);
+    }
+
+    fn relayout_window(&mut self, show: bool) {
+        self.relayout_for_monitor(metrics_for_window(self.hwnd), show);
+    }
+
+    fn relayout_for_monitor(&mut self, monitor: MonitorMetrics, show: bool) {
+        self.monitor = monitor;
+        self.frames.set_refresh_rate(monitor.refresh_hz);
         let mut metrics = Metrics::new(
             &self.config.appearance,
             &self.config.behavior,
             &self.config.motion,
-            self.dpi_scale,
+            self.monitor.dpi_scale,
         );
         let available_width = (monitor.work.width() as f32 - 2.0 * metrics.shadow).max(1.0);
         if metrics.window_width(self.config.items.len()) > available_width {
@@ -2028,11 +2025,12 @@ impl DockApp {
         self.geometry = DockGeometry::with_items(&self.config.items, &self.metrics);
         let width = self.geometry.window.width.ceil().max(1.0) as u32;
         let height = self.geometry.window.height.ceil().max(1.0) as u32;
-        let margin = self.config.appearance.edge_margin * self.dpi_scale;
-        let offset = self.config.monitor.offset * self.dpi_scale;
+        let margin = self.config.appearance.edge_margin * self.monitor.dpi_scale;
+        let offset = self.config.monitor.offset * self.monitor.dpi_scale;
         let (x, y) = place_dock(monitor.work, width, height, margin, offset);
         tracing::info!(
-            dpi = self.dpi_scale,
+            dpi = self.monitor.dpi_scale,
+            refresh_hz = monitor.refresh_hz,
             width,
             height,
             x,
@@ -2045,6 +2043,7 @@ impl DockApp {
         );
         set_bounds(self.hwnd, x, y, width, height, show);
         self.window_origin = (x, y);
+        self.apply_dock_layer();
         self.update_native_glass();
         if self.window_visible
             && !self.native_glass
@@ -2053,18 +2052,8 @@ impl DockApp {
         {
             self.ensure_native_glass();
         }
-        if let Err(error) = self.surface.resize(width, height) {
-            tracing::error!(%error, "failed to resize layered surface");
-        }
         self.icons.set_capacity(self.config.items.len().max(64));
-        self.update_motion_layout(0.0);
         self.close_menu_immediately();
-        if self.frame_timer {
-            // A DPI/refresh change can alter the timer interval; restart the
-            // frame timer so the new sampling density takes effect.
-            self.kill_frame_timer();
-            self.animate();
-        }
     }
 
     fn glass_rect(&self) -> (i32, i32, u32, u32, f32) {
@@ -2085,7 +2074,6 @@ impl DockApp {
             glass.place_below(self.hwnd);
             self.native_glass = true;
             self.update_native_glass();
-            self.update_motion_layout(0.0);
             return;
         }
         let (x, y, width, height, radius) = self.glass_rect();
@@ -2100,10 +2088,9 @@ impl DockApp {
             self.config.appearance.opacity,
         ) {
             Some(glass) => {
-                glass.place_below(self.hwnd);
                 self.glass = Some(glass);
                 self.native_glass = true;
-                self.update_motion_layout(0.0);
+                self.place_glass_below_dock();
                 tracing::info!(width, height, "Windows.UI.Composition glass enabled");
             }
             None => {
@@ -2144,7 +2131,7 @@ impl DockApp {
         self.glass_failed = false;
         self.ensure_native_glass();
     }
-    fn update_motion_layout(&mut self, dt: f32) -> MotionSnapshot {
+    fn update_motion_layout(&mut self, dt: f32) -> (MotionSnapshot, FrameLayout) {
         let now = self.now();
         let snapshot = self.motion.update(
             now,
@@ -2154,11 +2141,12 @@ impl DockApp {
             &self.metrics,
             &self.state.running,
         );
-        self.layout = FrameLayout::compute(&self.geometry, &self.metrics, &snapshot.layout_scales);
+        let mut layout =
+            FrameLayout::compute(&self.geometry, &self.metrics, &snapshot.layout_scales);
         if self.native_glass {
-            self.layout.dock = self.geometry.dock_base;
+            layout.dock = self.geometry.dock_base;
         }
-        snapshot
+        (snapshot, layout)
     }
 
     fn icon_animations(snapshot: &MotionSnapshot) -> Vec<IconAnimation> {
@@ -2179,13 +2167,12 @@ impl DockApp {
             .collect()
     }
 
-    fn drag_visual(&self) -> Option<DragVisual> {
+    fn drag_visual(&self, layout: &FrameLayout) -> Option<DragVisual> {
         let drag = self.state.drag.as_ref()?;
         if !drag.active {
             return None;
         }
-        let remaining: Vec<Rect> = self
-            .layout
+        let remaining: Vec<Rect> = layout
             .icons
             .iter()
             .enumerate()
@@ -2202,15 +2189,18 @@ impl DockApp {
         })
     }
 
-    fn draw(&mut self) -> Option<Pixmap> {
-        let snapshot = self.update_motion_layout(0.0);
-        let drag = self.drag_visual();
-        let animations = Self::icon_animations(&snapshot);
+    fn prepare_frame(
+        &mut self,
+        snapshot: &MotionSnapshot,
+        layout: &FrameLayout,
+    ) -> (DockFrame, Option<Point>) {
+        let drag = self.drag_visual(layout);
+        let animations = Self::icon_animations(snapshot);
         let scene = DockScene {
             config: &self.config,
             metrics: &self.metrics,
             geometry: &self.geometry,
-            layout: &self.layout,
+            layout,
             animations: &animations,
             state: &self.state,
             palette: self.palette,
@@ -2223,45 +2213,58 @@ impl DockApp {
             error_progress: self.error_spring.value(),
             drag,
         };
-        let mut pixmap = self.renderer.render_dock(&scene)?;
+        let overlay = self.menu.as_ref().and_then(|menu| {
+            let opacity = self.menu_spring.value().clamp(0.0, 1.0);
+            if opacity <= 0.01 {
+                return None;
+            }
+            let offset = ((1.0 - opacity) * 9.0 * self.monitor.dpi_scale).round();
+            let position = Point::new(menu.position.x.round(), menu.position.y.round() + offset);
+            Some(MenuOverlay {
+                hit: (!menu.closing).then_some(HitShape {
+                    rect: menu.layout.bubble.translate(position.x, position.y),
+                    radius: menu.layout.radius,
+                }),
+                pixels: &menu.pixmap,
+                position,
+                opacity,
+            })
+        });
+        let position = overlay.as_ref().map(|overlay| overlay.position);
+        (self.renderer.prepare_frame(&scene, overlay), position)
+    }
 
-        if let Some(menu) = self.menu.as_ref() {
-            let progress = self.menu_spring.value().clamp(0.0, 1.0);
-            if progress > 0.01 {
-                let offset = ((1.0 - progress) * 9.0 * self.dpi_scale).round() as i32;
-                let paint = PixmapPaint {
-                    opacity: progress,
-                    blend_mode: tiny_skia::BlendMode::SourceOver,
-                    quality: FilterQuality::Nearest,
-                };
-                pixmap.draw_pixmap(
-                    menu.position.x.round() as i32,
-                    menu.position.y.round() as i32 + offset,
-                    menu.pixmap.as_ref(),
-                    &paint,
-                    Transform::identity(),
-                    None,
-                );
+    fn present(&mut self, snapshot: &MotionSnapshot, layout: FrameLayout) -> Submission {
+        let (frame, menu_position) = self.prepare_frame(snapshot, &layout);
+        let result = self.presenter.present(
+            &mut self.renderer,
+            &frame,
+            self.config.appearance.gpu_acceleration,
+        );
+        if result == Submission::Presented {
+            self.layout = layout;
+            self.hit_shapes = frame.hit_shapes;
+            if let Some(menu) = &mut self.menu {
+                menu.displayed = menu_position;
             }
         }
-        Some(pixmap)
+        result
     }
 
-    fn render(&mut self) {
-        let Some(pixmap) = self.draw() else {
-            return;
-        };
-        if let Err(error) = self
-            .surface
-            .present(pixmap.width(), pixmap.height(), pixmap.data())
-        {
-            tracing::error!(%error, "present failed");
+    pub fn frame_wait_handle(&self) -> Option<HANDLE> {
+        self.frames.wait_handle()
+    }
+
+    pub fn use_frame_timer_fallback(&mut self) {
+        self.frames.use_fallback();
+    }
+
+    pub fn on_frame(&mut self) {
+        if let Some(stats) = &mut self.frame_stats {
+            stats.begin_frame();
         }
-    }
-
-    fn on_frame(&mut self) {
-        let delta = self.clock.delta();
-        let snapshot = self.update_motion_layout(delta);
+        let delta = self.frames.begin_frame(Instant::now());
+        let (snapshot, layout) = self.update_motion_layout(delta);
         let mut animating = snapshot.active;
         animating |= self.tooltip_spring.step(delta);
         animating |= self.error_spring.step(delta);
@@ -2285,33 +2288,26 @@ impl DockApp {
             self.apply_dock_layer();
         }
 
-        self.render();
-        if !animating {
-            self.kill_frame_timer();
+        let submission = self.present(&snapshot, layout);
+        if let Some(stats) = &mut self.frame_stats {
+            stats.record(submission);
+        }
+        if animating || submission == Submission::Busy {
+            self.frames.continue_frames();
+        } else {
+            self.stop_frames();
+        }
+    }
+
+    fn stop_frames(&mut self) {
+        self.frames.stop();
+        if let Some(stats) = &mut self.frame_stats {
+            stats.finish(self.presenter.gpu_active());
         }
     }
 
     fn animate(&mut self) {
-        if self.frame_timer {
-            return;
-        }
-        self.clock.reset();
-        unsafe {
-            let _ = SetTimer(
-                Some(self.hwnd),
-                TIMER_FRAME,
-                self.frame_interval_ms.max(1),
-                None,
-            );
-        }
-        self.frame_timer = true;
-    }
-
-    fn kill_frame_timer(&mut self) {
-        if self.frame_timer {
-            self.kill_timer(TIMER_FRAME);
-            self.frame_timer = false;
-        }
+        self.frames.start();
     }
 
     fn kill_timer(&self, id: usize) {
@@ -2321,8 +2317,8 @@ impl DockApp {
     }
 
     fn kill_all_timers(&mut self) {
+        self.stop_frames();
         for id in [
-            TIMER_FRAME,
             TIMER_TOOLTIP,
             TIMER_SAVE,
             TIMER_ERROR,
@@ -2331,7 +2327,6 @@ impl DockApp {
         ] {
             self.kill_timer(id);
         }
-        self.frame_timer = false;
         self.tooltip_timer = false;
         self.save_timer = false;
         self.error_timer = false;
@@ -2341,7 +2336,7 @@ impl DockApp {
     fn on_timer(&mut self, id: usize) {
         match id {
             TIMER_FRAME => {
-                if self.frame_timer {
+                if self.frames.fallback_active() {
                     self.on_frame();
                 }
             }
@@ -2403,7 +2398,7 @@ impl DockApp {
             }
         }
         if changed {
-            self.render();
+            self.animate();
         }
     }
 
@@ -2464,7 +2459,7 @@ impl DockApp {
             self.state.running = running;
             // A running-dot change is a static state change; no frame timer is
             // needed. Launch/waiting animations keep their own timer alive.
-            self.render();
+            self.animate();
         }
     }
 
@@ -2487,7 +2482,7 @@ impl DockApp {
             self.theme = theme;
             self.palette = palette_for(&self.config, theme);
             self.update_native_glass();
-            self.render();
+            self.animate();
         }
     }
 
@@ -2528,18 +2523,13 @@ impl DockApp {
         }
         self.error_timer = true;
         self.animate();
-        self.render();
     }
 
     fn hit_test(&self, lparam: LPARAM) -> i32 {
         let screen = screen_point(lparam);
         let client = screen_to_client(self.hwnd, screen);
         let point = Point::new(client.x as f32, client.y as f32);
-        if self.menu.as_ref().is_some_and(|menu| menu.contains(point)) {
-            return HTCLIENT as i32;
-        }
-        let margin = 6.0 * self.dpi_scale;
-        if self.layout.dock.inset(-margin).contains(point) || self.hit_icon(point).is_some() {
+        if self.hit_shapes.iter().any(|shape| shape.contains(point)) {
             return HTCLIENT as i32;
         }
         HTTRANSPARENT
@@ -2548,29 +2538,42 @@ impl DockApp {
     /// Runs a lightweight self test: renders one frame and checks the idle
     /// timer invariant. It writes nothing, including the configuration.
     pub fn selftest(&mut self) -> bool {
-        let snapshot = self.update_motion_layout(0.0);
-        let Some(pixmap) = self.draw() else {
+        let (snapshot, layout) = self.update_motion_layout(0.0);
+        let (frame, _) = self.prepare_frame(&snapshot, &layout);
+        let Some(pixmap) = self.renderer.render_frame(&frame) else {
             tracing::error!("selftest: renderer produced no pixmap");
             return false;
         };
-        let timers_idle = !self.frame_timer
+        let timers_idle = !self.frames.active()
             && !self.tooltip_timer
             && !self.save_timer
             && !self.error_timer
             && !self.running_timer
             && !self.state.menu_open;
+        let gpu_requested = self.config.appearance.gpu_acceleration;
+        let mut submitted = self
+            .presenter
+            .present(&mut self.renderer, &frame, gpu_requested);
+        if submitted == Submission::Busy {
+            submitted = self
+                .presenter
+                .present(&mut self.renderer, &frame, gpu_requested);
+        }
         let ok = timers_idle
+            && submitted == Submission::Presented
             && !snapshot.active
             && pixmap.width() > 0
             && pixmap.height() > 0
             && pixmap.pixels().iter().any(|pixel| pixel.alpha() > 0)
-            && self.layout.icons.len() == self.config.items.len();
+            && layout.icons.len() == self.config.items.len();
         tracing::info!(
             items = self.config.items.len(),
             width = pixmap.width(),
             height = pixmap.height(),
-            dpi = self.dpi_scale,
-            frame_timer = self.frame_timer,
+            dpi = self.monitor.dpi_scale,
+            gpu = self.presenter.gpu_active(),
+            ?submitted,
+            frame_timer = self.frames.active(),
             tooltip_timer = self.tooltip_timer,
             save_timer = self.save_timer,
             error_timer = self.error_timer,

@@ -16,6 +16,15 @@ pub(crate) enum PressAccent {
     GlowWave,
 }
 
+impl PressAccent {
+    fn duration(self) -> f32 {
+        match self {
+            Self::BounceDouble => 0.520,
+            Self::GlowWave => 0.420,
+        }
+    }
+}
+
 /// Where the press scale currently is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -97,9 +106,10 @@ impl PressState {
         }
     }
 
-    /// Cancels the press and eases back without a rebound.
+    /// Cancels a held press and eases back without a rebound. Completed
+    /// clicks keep their release motion and accent when the pointer leaves.
     pub fn cancel(&mut self, now: f32) {
-        if self.phase == Phase::Idle {
+        if self.phase != Phase::Down {
             return;
         }
         let current = self.sample_scale(now);
@@ -125,17 +135,21 @@ impl PressState {
     /// `true` while the press or an accent still needs frames.
     #[must_use]
     pub fn is_active(&self, now: f32) -> bool {
-        match self.phase {
-            Phase::Idle => {}
-            Phase::Down => return true,
-            Phase::Release => return now - self.started < PRESS_RELEASE_S,
-            Phase::Settling => return now - self.started < SETTLE_S,
-        }
-        match self.accent {
-            Some(PressAccent::BounceDouble) => now - self.accent_started < 0.520,
-            Some(PressAccent::GlowWave) => now - self.accent_started < 0.420,
-            None => false,
-        }
+        let scale_active = match self.phase {
+            Phase::Idle => false,
+            Phase::Down => now - self.started < PRESS_DOWN_S,
+            Phase::Release => now - self.started < PRESS_RELEASE_S,
+            Phase::Settling => now - self.started < SETTLE_S,
+        };
+        scale_active
+            || self
+                .accent
+                .is_some_and(|accent| now - self.accent_started < accent.duration())
+    }
+
+    /// The held pose still suppresses the status dot after it stops animating.
+    pub fn holds_status(&self, now: f32) -> bool {
+        self.phase == Phase::Down || self.is_active(now)
     }
 
     /// Current press scale without the accent.
@@ -174,26 +188,21 @@ impl PressState {
             return frame;
         };
         let elapsed = (now - self.accent_started).max(0.0);
+        if elapsed >= accent.duration() {
+            return frame;
+        }
         match accent {
             PressAccent::BounceDouble => {
-                if elapsed < 0.520 {
-                    let t = elapsed;
-                    frame.offset_y -= double_bounce_px(t, metrics) * metrics.scale;
-                    frame.active = true;
-                }
+                frame.offset_y -= double_bounce_px(elapsed) * metrics.scale;
             }
             PressAccent::GlowWave => {
-                if elapsed < 0.420 {
-                    let t = elapsed / 0.420;
-                    let icon = metrics.icon;
-                    frame.ripple = Some(RippleMotion {
-                        radius: icon * lerp(0.5, 1.7, t),
-                        width: lerp(2.0, 0.5, t) * metrics.scale,
-                        opacity: lerp(0.45, 0.0, ease_out_cubic(t)),
-                    });
-                    frame.glow = (1.0 - t) * 0.35;
-                    frame.active = true;
-                }
+                let t = elapsed / accent.duration();
+                frame.ripple = Some(RippleMotion {
+                    radius: metrics.icon * lerp(0.5, 1.7, t),
+                    width: lerp(2.0, 0.5, t) * metrics.scale,
+                    opacity: lerp(0.45, 0.0, ease_out_cubic(t)),
+                });
+                frame.glow = (1.0 - t) * 0.35;
             }
         }
         frame
@@ -201,16 +210,15 @@ impl PressState {
 }
 
 /// Two decreasing bounces: 0 / -6 / 0 / -2 / 0 DIP at 0/100/230/350/520 ms.
-fn double_bounce_px(elapsed: f32, _metrics: &Metrics) -> f32 {
-    let px = |dip: f32| dip;
+fn double_bounce_px(elapsed: f32) -> f32 {
     if elapsed < 0.100 {
-        lerp(px(0.0), px(6.0), ease_out_cubic(elapsed / 0.100))
+        lerp(0.0, 6.0, ease_out_cubic(elapsed / 0.100))
     } else if elapsed < 0.230 {
-        lerp(px(6.0), 0.0, ease_in_out_cubic((elapsed - 0.100) / 0.130))
+        lerp(6.0, 0.0, ease_in_out_cubic((elapsed - 0.100) / 0.130))
     } else if elapsed < 0.350 {
-        lerp(0.0, px(2.0), ease_in_out_cubic((elapsed - 0.230) / 0.120))
+        lerp(0.0, 2.0, ease_in_out_cubic((elapsed - 0.230) / 0.120))
     } else {
-        lerp(px(2.0), 0.0, ease_out_cubic((elapsed - 0.350) / 0.170))
+        lerp(2.0, 0.0, ease_out_cubic((elapsed - 0.350) / 0.170))
     }
 }
 
@@ -239,6 +247,8 @@ mod tests {
         press.pointer_down(1.0, 1.0);
         assert!(close(press.frame(1.0, &metrics).scale, 1.0));
         assert!(close(press.frame(1.075, &metrics).scale, PRESSED_SCALE));
+        assert!(!press.is_active(1.080));
+        assert!(press.holds_status(1.080));
         press.pointer_up(1.075, None);
         let peak = press.frame(1.075 + 0.090, &metrics).scale;
         assert!((peak - RELEASE_PEAK).abs() < 0.01);
@@ -269,6 +279,8 @@ mod tests {
         assert!(first < -5.0);
         assert!(second < -1.0);
         assert!(first < second);
+        assert!(press.is_active(0.070 + 0.510));
+        assert!(!press.is_active(0.070 + 0.521));
         assert!(close(press.frame(0.070 + 0.520, &metrics).offset_y, 0.0));
     }
 
@@ -282,6 +294,8 @@ mod tests {
         let late = press.frame(0.070 + 0.380, &metrics).ripple.expect("ripple");
         assert!(late.radius > early.radius);
         assert!(late.opacity < early.opacity);
+        assert!(press.is_active(0.070 + 0.410));
+        assert!(!press.is_active(0.070 + 0.421));
         assert!(press.frame(0.070 + 0.420, &metrics).ripple.is_none());
     }
 }

@@ -7,7 +7,7 @@ Glide-Dock 是一个用 **Rust + Win32** 实现的常驻桌面启动栏：首次
 `.lnk` / `.exe` / 文件夹 / 文件后才生成条目。它保留 Winstep Nexus 的效率内核
 （常驻、拖放管理、运行状态、外观可调），但重新设计了内容来源、交互与视觉语言。
 
-![Glide-Dock 品牌 Logo](assets/brand/01-Logo/Glide-Dock-Logo-Horizontal.png)
+![Glide-Dock 品牌 Logo](assets/brand/01-Logo/Glide-Dock-Logo-Horizontal.svg)
 
 ![右键菜单](preview/06-menu-closeup.png)
 
@@ -21,7 +21,7 @@ Glide-Dock 是一个用 **Rust + Win32** 实现的常驻桌面启动栏：首次
 
 ## 当前状态
 
-**v0.4.2 · M2 MVP 已完成，M3 部分完成，M4 设置中心与五层动效系统已落地。**
+**v0.4.3 · M2 MVP 已完成，M3 部分完成，M4 设置中心与五层动效系统已落地。**
 
 | 能力 | 状态 |
 | --- | --- |
@@ -40,6 +40,7 @@ Glide-Dock 是一个用 **Rust + Win32** 实现的常驻桌面启动栏：首次
 | 启动等待呼吸点 / 运行状态点（4 DIP） | ✅ 已实现 |
 | 设置中心切换动效、调参、实时同步、复制动画配置 | ✅ 已实现 |
 | 动画关闭 / 跟随系统减少动态效果 / 刷新率与 DPI 适配 | ✅ 已实现 |
+| 主 Dock 硬件绘制 | ✅ 默认尝试 D3D11 + Direct2D，故障时自动回退 tiny-skia |
 | 拖动排序 / 拖出移除 | ✅ 已实现 |
 | 右键菜单（设置、添加开始菜单/分隔线/商店应用、打开、打开位置、移除、重载、配置目录、退出） | ✅ 已实现 |
 | JSON 配置、原子写、版本迁移、损坏自愈 | ✅ 已实现，schema v3 |
@@ -86,7 +87,7 @@ Glide-Dock 是一个用 **Rust + Win32** 实现的常驻桌面启动栏：首次
 > Medium 完整性包，或把 zip 解压到桌面再运行。
 
 ```powershell
-# 推荐：构建并打包到 %LOCALAPPDATA%\Glide-Dock\Glide-Dock-v0.4.2（Medium 完整性）
+# 推荐：构建并打包到 %LOCALAPPDATA%\Glide-Dock\Glide-Dock-v0.4.3（Medium 完整性）
 powershell -ExecutionPolicy Bypass -File scripts/package.ps1
 
 # 构建品牌安装包（单文件 Setup.exe；输出到 %LOCALAPPDATA%\Glide-Dock\installer）
@@ -103,6 +104,11 @@ cargo run -p glide-dock -- --settings
 
 # 无窗口自检：建窗 → 渲染一帧 → 断言全部定时器空闲 → 不读写用户配置 → 退出码 0
 cargo run -p glide-dock -- --selftest
+
+# 强制使用 CPU，可用于故障排查或性能对照
+$env:GLIDE_DOCK_RENDERER = 'cpu'
+cargo run -p glide-dock -- --selftest
+Remove-Item Env:GLIDE_DOCK_RENDERER
 
 # 生成预览图到 preview/（使用真实系统图标）
 cargo run -p glide-dock -- --render-preview preview
@@ -124,6 +130,10 @@ cargo run -p glide-dock -- --config .\preview\my-config.json
 ```
 
 发布时使用 `scripts\\build-installer.ps1` 生成的 Tauri 安装器；安装器会把 Rust Dock及其资源解包到目标目录。Dock/Slint 分发不再要求 .NET SDK、WinUI 发布目录或 `settings-app\\publish`。
+
+安装与更新由下载的新版安装 EXE 执行；权限足够时直接在当前进程的后台线程完成，只有需要 UAC 时才提权启动同一文件交接操作。只有版本更高的安装包允许更新；同版、旧版或无法识别已安装版本时均禁止覆盖。安装目录仅保留独立的 `Glide-Dock 卸载程序.exe`，不包含旧安装包数据，也不提供更新入口；卸载时仅在需要删除自身所在目录的情况下复制到临时目录。构建脚本会先生成 `glide-uninstall`，再将它与应用数据嵌入单文件安装包。卸载进程的工作目录始终位于安装目录之外，部分删除后仍可依据注册信息继续清理；程序文件已经移除时，残留空目录、快捷方式、卸载记录或个人数据的清理问题会显示为完成后的警告，仍有程序文件未删除时则保留卸载记录并允许重试。
+
+安装与卸载窗口采用固定尺寸，常规为 840×620 逻辑像素，小屏幕或高 DPI 下会在启动时适配工作区；窗口仅保留关闭按钮，禁止手动缩放、最大化和最小化。窗口外框为直角矩形，浅色、深色均使用渐变细描边、内侧高光与系统阴影，关闭按钮采用灰色细线叉号。
 
 ## 交互
 
@@ -262,8 +272,8 @@ Dock 同时启动一个隐藏的 `glide-dock.exe --guard` 守护进程：
 - 固定基础中心 `aᵢ`、单一鼠标 `x`，`d=|x-aᵢ|`，`weight=smoothstep(1-d/R)`；
 - `target=1+(Smax-1)·weight`；默认 `Smax=1.35`，`R=1.7×66=112.2 DIP`；
 - 整场使用真实时间指数平滑，进入 `τ=35ms`、退出 `τ=50ms`，无过冲、无硬切；
-- 所有图标采用 bottom-center 缩放，底部基准线不动；默认 1.35× 时使用固定槽位中心，
-  更大倍率才启用防止重叠的确定性避让；窗口尺寸和基础锚点不变；
+- 图标采用 bottom-center 缩放，底部基准线固定。默认 1.35× 使用原槽位中心。
+  碰到挤压时，在固定分隔线之间连续重排，优先使用间隙，空间不足时等比例缩减放大增量；
 - 鼠标离开后目标归 1，但当前值按 50ms 平滑收敛；恢复中重新进入直接续接当前状态。
 
 实现位置：`crates/dock-core/src/magnification/`。其他悬停预设仍保留各自的指针语言，
@@ -291,8 +301,10 @@ Dock 同时启动一个隐藏的 `glide-dock.exe --guard` 守护进程：
 ```
 app/                              # glide-dock.exe：CLI、消息循环、状态机、离线预览
 installer/                        # Rust + Tauri + Fluent UI React 安装器（glide-setup.exe）
+uninstaller/                      # 独立卸载程序（glide-uninstall.exe），复用安装器界面与卸载逻辑
 crates/dock-core/                 # 纯模型 / 几何 / 布局 / 五层动效引擎 / 主题（零 OS 依赖）
-crates/dock-render/               # tiny-skia + ab_glyph：Dock、菜单、提示、阴影
+app/src/presenter/                # D3D11 / Direct2D / DirectComposition、输入掩码与运行中回退
+crates/dock-render/               # 共享 DockFrame、tiny-skia、文字与菜单位图
 crates/dock-storage/              # JSON、原子写、迁移、损坏备份
 crates/dock-platform-windows/     # 分层窗口、DIB、Shell、图标线程、拖放、DPI
 preview/                          # 离线渲染的设计评审图 + 设置中心截图
@@ -312,11 +324,9 @@ scripts/build-installer.ps1       # 构建 payload 并编译 Tauri 安装器
 - **LauncherService 解耦**：`app::launcher` 只负责后台启动与结果队列；动画引擎只接收
   `begin_launch` / `window_detected` / `window_closed` 等语义事件，从不等待启动结果。
   启动动画结束不代表应用已启动，等待状态仍只由 WindowTracker 控制。
-- **分层窗口**：`WS_EX_LAYERED` + 32bpp 顶朝下 DIB + `UpdateLayeredWindow`，
-  逐像素 alpha，不需要 WebView / GPU。
-- **同一窗口承载菜单**：Dock 与右键菜单共用一个更大的透明分层窗口，避免第二个
-  窗口和跨窗口状态同步；窗口顶部预留菜单/提示空间，透明区域通过
-  `WM_NCHITTEST → HTTRANSPARENT` 点击穿透。
+- 主 Dock 默认由 D3D11 + Direct2D 绘制，DirectComposition 将预乘 BGRA 交换链呈现在原有分层窗口上。
+  同一 HWND 承载右键菜单。GPU 模式按命中几何更新输入掩码，零 Alpha 区域允许下方应用收到点击。
+  GPU 故障时由 tiny-skia 在原窗口绘制当前帧，离线预览也使用 tiny-skia。
 - **字体**：Segoe UI + Microsoft YaHei 回退，`FontArc` 共享一份 19 MB CJK 字体，
   避免常规/半粗两份重复加载。
 - **毛玻璃背景**：`Windows.UI.Composition` 的 `CreateHostBackdropBrush` + `DWMWA_USE_HOSTBACKDROPBRUSH`
@@ -340,9 +350,9 @@ scripts/build-installer.ps1       # 构建 payload 并编译 Tauri 安装器
   文件夹和 URL 走 ShellExecuteEx；商店应用走 `IApplicationActivationManager`，Low
   Integrity 下回退到 AppsFolder。所有请求统一进入后台 LauncherService，不经过
   `cmd.exe` / PowerShell。
-- **空闲即零成本**：所有弹簧收敛后 `KillTimer`，消息循环阻塞在 `GetMessageW`；
-  只有悬停/拖动/菜单/提示等交互期间才存在帧定时器。启动等待超过 12 s 仍未确认
-  窗口时自动回到空闲；菜单在 30 s 后或前台窗口变化时关闭。
+- 界面线程按显示器刷新率调度，每帧共用一个 `MotionSnapshot`。高精度可等待定时器不可用时使用
+  `WM_TIMER`。动效完成后提交最终静止帧并停表，消息循环回到 `GetMessageW`。
+  启动等待最多 12 s，菜单在 30 s 后或前台窗口变化时关闭。
 
 ## 验证
 
@@ -358,7 +368,7 @@ cargo run -p glide-dock -- --render-preview preview
 
 - `cargo fmt` 通过；
 - `cargo clippy -D warnings` 通过；
-- **175 个 Rust 单元测试通过**（core 110 / render 23 / platform 20 / storage 13 / app 9）；
+- Dock 相关的 195 项 Rust 单元测试通过（core 115 / render 23 / platform 25 / storage 13 / app 19）；
 - `--selftest` 退出码 0，断言全部定时器与菜单均空闲，并且不读写用户配置；
 - 动效引擎测试覆盖 6 套悬停、4 套启动、100/210/340ms、100/230/350/520ms、Wave 延迟、
   Perspective ±5°、组合倍率/位移、减少动态效果、60/120/144 Hz 与 v1/v2→v3 迁移；

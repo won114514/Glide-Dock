@@ -12,6 +12,13 @@ use windows::core::{PCWSTR, w};
 /// Runs a fixed executable through UAC, then returns its exit code.
 /// `arguments` is an already encoded Windows command line without argv[0].
 pub fn run_elevated(exe: &Path, arguments: &str) -> windows::core::Result<u32> {
+    let directory = exe.parent().map(|parent| {
+        parent
+            .as_os_str()
+            .encode_wide()
+            .chain([0])
+            .collect::<Vec<_>>()
+    });
     let exe: Vec<_> = exe.as_os_str().encode_wide().chain([0]).collect();
     let arguments = crate::wide(arguments);
     let mut info = SHELLEXECUTEINFOW {
@@ -20,6 +27,9 @@ pub fn run_elevated(exe: &Path, arguments: &str) -> windows::core::Result<u32> {
         lpVerb: w!("runas"),
         lpFile: PCWSTR(exe.as_ptr()),
         lpParameters: PCWSTR(arguments.as_ptr()),
+        lpDirectory: directory
+            .as_ref()
+            .map_or(PCWSTR::null(), |directory| PCWSTR(directory.as_ptr())),
         nShow: SW_HIDE.0,
         ..Default::default()
     };
@@ -39,6 +49,13 @@ pub fn run_elevated(exe: &Path, arguments: &str) -> windows::core::Result<u32> {
 
 /// Starts a UAC-elevated worker without waiting for it to finish.
 pub fn spawn_elevated_detached(exe: &Path, arguments: &str) -> windows::core::Result<()> {
+    let directory = exe.parent().map(|parent| {
+        parent
+            .as_os_str()
+            .encode_wide()
+            .chain([0])
+            .collect::<Vec<_>>()
+    });
     let exe: Vec<_> = exe.as_os_str().encode_wide().chain([0]).collect();
     let arguments = crate::wide(arguments);
     let mut info = SHELLEXECUTEINFOW {
@@ -47,6 +64,9 @@ pub fn spawn_elevated_detached(exe: &Path, arguments: &str) -> windows::core::Re
         lpVerb: w!("runas"),
         lpFile: PCWSTR(exe.as_ptr()),
         lpParameters: PCWSTR(arguments.as_ptr()),
+        lpDirectory: directory
+            .as_ref()
+            .map_or(PCWSTR::null(), |directory| PCWSTR(directory.as_ptr())),
         nShow: SW_HIDE.0,
         ..Default::default()
     };

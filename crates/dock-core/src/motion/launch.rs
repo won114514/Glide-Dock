@@ -192,11 +192,14 @@ impl LaunchState {
     }
 
     /// Launch failed: clear waiting state and ease the icon back.
-    pub fn fail(&mut self, now: f32) {
+    pub fn fail(&mut self, now: f32, metrics: &Metrics) {
         self.confirmed = false;
         match self.phase {
             LaunchPhase::Idle => {}
             LaunchPhase::Running => {
+                let current = self.frame(now, false, metrics);
+                self.from_scale = current.scale;
+                self.from_offset = current.offset_y;
                 self.phase = LaunchPhase::Settling;
                 self.started = now;
             }
@@ -207,7 +210,6 @@ impl LaunchState {
         }
     }
 
-    /// Cancels the timeline and eases back.
     /// Elapsed waiting time, used by the status layer.
     #[must_use]
     pub fn waiting_elapsed(&self, now: f32) -> f32 {
@@ -493,6 +495,25 @@ mod tests {
         launch.window_detected();
         assert_eq!(launch.phase(), LaunchPhase::Idle);
         assert!(!launch.is_waiting());
+    }
+
+    #[test]
+    fn failure_continues_from_the_current_pose_then_settles() {
+        let metrics = metrics();
+        let now = 0.08;
+        let mut state = LaunchState::default();
+        state.begin(0.0, LaunchPreset::GlideLaunch, true, 0.9, 0.0, false);
+        let before = state.frame(now, false, &metrics);
+        state.fail(now, &metrics);
+        let after = state.frame(now, false, &metrics);
+        assert_eq!(before.scale, after.scale);
+        assert_eq!(before.offset_y, after.offset_y);
+        assert!(state.frame(now + 0.13, false, &metrics).active);
+        state.advance(now + 0.14, false);
+        assert_eq!(
+            state.frame(now + 0.14, false, &metrics),
+            LaunchFrame::default()
+        );
     }
 
     #[test]

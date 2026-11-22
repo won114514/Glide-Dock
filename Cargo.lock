@@ -1461,7 +1461,7 @@ dependencies = [
 
 [[package]]
 name = "dock-core"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -1469,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "dock-platform-windows"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "dock-core",
  "serde",
@@ -1481,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "dock-render"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "ab_glyph",
  "dock-core",
@@ -1491,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "dock-storage"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "dock-core",
  "serde_json",
@@ -2218,7 +2218,7 @@ dependencies = [
 
 [[package]]
 name = "glide-dock"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "dock-core",
  "dock-platform-windows",
@@ -2232,21 +2232,42 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows",
+ "windows-numerics",
  "winres",
 ]
 
 [[package]]
 name = "glide-setup"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "dock-core",
  "dock-platform-windows",
  "dock-storage",
+ "semver",
  "serde",
  "serde_json",
  "tauri",
  "tauri-build",
  "tracing",
+ "webview2-com",
+ "windows",
+ "zip",
+]
+
+[[package]]
+name = "glide-uninstall"
+version = "0.4.3"
+dependencies = [
+ "dock-core",
+ "dock-platform-windows",
+ "dock-storage",
+ "semver",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tracing",
+ "webview2-com",
  "windows",
  "zip",
 ]

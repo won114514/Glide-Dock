@@ -30,7 +30,6 @@ pub use glass::GlassBackdrop;
 pub use icons::{IconImage, IconResult, IconService, WM_ICON_READY, extract_icon};
 pub use monitor::{
     MonitorMetrics, WorkArea, clamp_window, metrics_for_window, place_dock, primary_work_area,
-    refresh_hz,
 };
 pub use resolver::{ResolveResult, ResolveService, WM_PATHS_RESOLVED};
 pub use shell::{

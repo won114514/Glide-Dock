@@ -276,6 +276,8 @@ pub struct Appearance {
     /// captures the screen.
     #[serde(default = "default_true")]
     pub frosted_glass: bool,
+    /// Prefer hardware rendering for the main Dock window.
+    pub gpu_acceleration: bool,
 }
 
 impl Default for Appearance {
@@ -292,6 +294,7 @@ impl Default for Appearance {
             layer: DockLayer::Desktop,
             edge_margin: 10.0,
             frosted_glass: true,
+            gpu_acceleration: true,
         }
     }
 }
@@ -955,6 +958,19 @@ mod tests {
         assert_eq!(appearance.spacing, 0.0);
         assert_eq!(appearance.padding, 48.0);
         assert_eq!(appearance.opacity, 1.0);
+    }
+
+    #[test]
+    fn gpu_acceleration_preference_is_backwards_compatible() {
+        let mut config: DockConfig =
+            serde_json::from_str(r#"{"appearance":{"frosted_glass":false}}"#)
+                .expect("load an existing configuration");
+        assert!(config.appearance.gpu_acceleration);
+
+        config.appearance.gpu_acceleration = false;
+        let saved = serde_json::to_string(&config).expect("save the disabled preference");
+        let reloaded: DockConfig = serde_json::from_str(&saved).expect("reload the preference");
+        assert!(!reloaded.appearance.gpu_acceleration);
     }
 
     #[test]

@@ -232,9 +232,13 @@ impl MotionEngine {
         if !self.tuning.enabled {
             return;
         }
-        let accent = match (self.tuning.hover_preset, self.tuning.launch_preset) {
-            (HoverPreset::Bounce, LaunchPreset::TripleBounce) => None,
-            (HoverPreset::Glow, LaunchPreset::RippleLaunch) => None,
+        let launch = self
+            .tuning
+            .launch_enabled
+            .then_some(self.tuning.launch_preset);
+        let accent = match (self.tuning.hover_preset, launch) {
+            (HoverPreset::Bounce, Some(LaunchPreset::TripleBounce)) => None,
+            (HoverPreset::Glow, Some(LaunchPreset::RippleLaunch)) => None,
             (HoverPreset::Bounce, _) => Some(PressAccent::BounceDouble),
             (HoverPreset::Glow, _) => Some(PressAccent::GlowWave),
             _ => None,
@@ -253,9 +257,7 @@ impl MotionEngine {
     /// Cancels every pressed item (capture lost).
     pub fn cancel_all_presses(&mut self, now: f32) {
         for item in self.items.values_mut() {
-            if item.press.is_active(now) {
-                item.press.cancel(now);
-            }
+            item.press.cancel(now);
         }
     }
 
@@ -281,9 +283,9 @@ impl MotionEngine {
     }
 
     /// Launch failed: clear waiting, ease back and keep status truthful.
-    pub fn launch_failed(&mut self, now: f32, id: u32) {
+    pub fn launch_failed(&mut self, now: f32, id: u32, metrics: &Metrics) {
         if let Some(item) = self.items.get_mut(&id) {
-            item.launch.fail(now);
+            item.launch.fail(now, metrics);
         }
     }
 
@@ -501,7 +503,7 @@ impl MotionEngine {
             snapshot.layout_scales[index] = layout_scale;
             let press_frame = state.press.frame(now, metrics);
             let launch_frame = state.launch.frame(now, self.tuning.reduced, metrics);
-            let press_active = state.press.is_active(now);
+            let press_active = state.press.holds_status(now);
             let status = status_frame(&state.launch, press_active, self.tuning.reduced, now);
             let breathing = if self.tuning.hover_preset == HoverPreset::Glow
                 && hovered == Some(index)
@@ -789,6 +791,53 @@ mod tests {
         );
         assert!(snapshot.layout_scales[1] < snapshot.layout_scales[2]);
         assert!(snapshot.layout_scales[0] < snapshot.layout_scales[1]);
+    }
+
+    #[test]
+    fn released_click_accents_finish_after_pointer_leave_with_launch_disabled() {
+        let items = items(1);
+        let metrics = metrics();
+        let geometry = DockGeometry::new(items.len(), &metrics);
+        let id = items[0].id;
+        for (hover, launch, last_accent_sample, rest_sample) in [
+            (HoverPreset::Bounce, LaunchPreset::TripleBounce, 0.38, 0.521),
+            (HoverPreset::Glow, LaunchPreset::RippleLaunch, 0.41, 0.421),
+        ] {
+            let mut tuning = tuning(hover, launch);
+            tuning.launch_enabled = false;
+            let mut engine = MotionEngine::new(tuning);
+            engine.pointer_down(0.0, id);
+            engine.pointer_up(0.08, id);
+            engine.begin_launch(0.08, id, true);
+            engine.cancel_all_presses(0.1);
+            engine.set_pointer(0.1, None, None);
+            let running = BTreeSet::from([id]);
+            let before_end = engine.update(
+                0.08 + last_accent_sample,
+                0.0,
+                &items,
+                &geometry,
+                &metrics,
+                &running,
+            );
+            assert!(before_end.active);
+            match hover {
+                HoverPreset::Bounce => assert!(before_end.icons[0].offset_y < -0.5),
+                HoverPreset::Glow => assert!(before_end.icons[0].ripple.is_some()),
+                _ => unreachable!(),
+            }
+            let final_frame = engine.update(
+                0.08 + rest_sample,
+                0.0,
+                &items,
+                &geometry,
+                &metrics,
+                &running,
+            );
+            assert!(!final_frame.active);
+            assert_eq!(final_frame.icons[0].offset_y, 0.0);
+            assert!(final_frame.icons[0].ripple.is_none());
+        }
     }
 
     #[test]

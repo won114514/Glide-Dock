@@ -1,50 +1,172 @@
-//! Frame clock used by the animation timer.
+//! Event-driven frame scheduling on the Dock's UI thread.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-/// Measures frame deltas and clamps them so a suspended process never makes the
-/// dock jump.
-pub struct FrameClock {
-    last: Instant,
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
+use windows::Win32::System::Threading::{
+    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CancelWaitableTimer, CreateWaitableTimerExW,
+    SetWaitableTimer, TIMER_ALL_ACCESS,
+};
+use windows::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer};
+use windows::core::PCWSTR;
+
+pub const TIMER_FRAME: usize = 1;
+
+pub struct FrameScheduler {
+    hwnd: HWND,
+    timer: Option<HANDLE>,
+    period: Duration,
+    deadline: Option<Instant>,
+    last_frame: Instant,
+    fallback_active: bool,
 }
 
-impl Default for FrameClock {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl FrameClock {
-    /// Creates a clock anchored at now.
-    #[must_use]
-    pub fn new() -> Self {
+impl FrameScheduler {
+    pub fn new(hwnd: HWND, refresh_hz: u32) -> Self {
+        let timer = unsafe {
+            CreateWaitableTimerExW(
+                None,
+                PCWSTR::null(),
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                TIMER_ALL_ACCESS.0,
+            )
+        }
+        .inspect_err(|error| tracing::warn!(%error, "using WM_TIMER for animation"))
+        .ok();
         Self {
-            last: Instant::now(),
+            hwnd,
+            timer,
+            period: period(refresh_hz),
+            deadline: None,
+            last_frame: Instant::now(),
+            fallback_active: false,
         }
     }
 
-    /// Resets the anchor, used when a new animation run starts.
-    pub fn reset(&mut self) {
-        self.last = Instant::now();
+    pub fn active(&self) -> bool {
+        self.deadline.is_some()
     }
 
-    /// Returns the elapsed seconds since the previous call, capped at 34 ms.
-    pub fn delta(&mut self) -> f32 {
-        let now = Instant::now();
-        let delta = now.duration_since(self.last).as_secs_f32();
-        self.last = now;
-        delta.clamp(0.0, 0.034)
+    pub fn fallback_active(&self) -> bool {
+        self.fallback_active
+    }
+
+    pub fn wait_handle(&self) -> Option<HANDLE> {
+        self.deadline.and(self.timer)
+    }
+
+    pub fn set_refresh_rate(&mut self, refresh_hz: u32) {
+        let period = period(refresh_hz);
+        if self.period != period {
+            let active = self.active();
+            self.stop();
+            self.period = period;
+            if active {
+                self.start();
+            }
+        }
+    }
+
+    pub fn start(&mut self) {
+        if self.active() {
+            return;
+        }
+        self.last_frame = Instant::now();
+        self.deadline = Some(self.last_frame + self.period);
+        self.arm();
+    }
+
+    pub fn begin_frame(&mut self, now: Instant) -> f32 {
+        let delta = now.saturating_duration_since(self.last_frame);
+        self.last_frame = now;
+        delta.as_secs_f32().min(0.034)
+    }
+
+    pub fn continue_frames(&mut self) {
+        if let Some(deadline) = self.deadline
+            && self.timer.is_some()
+        {
+            self.deadline = Some(next_deadline(deadline, self.period, Instant::now()));
+            self.arm();
+        } else if !self.active() {
+            self.start();
+        }
+    }
+
+    fn arm(&mut self) {
+        let Some(deadline) = self.deadline else {
+            return;
+        };
+        if let Some(timer) = self.timer {
+            let delay = deadline.saturating_duration_since(Instant::now());
+            // A negative due time is relative, in units of 100 ns. Keep the
+            // absolute schedule on Instant so lateness doesn't accumulate.
+            let due_time = -(delay.as_nanos().div_ceil(100).max(1) as i64);
+            match unsafe { SetWaitableTimer(timer, &due_time, 0, None, None, false) } {
+                Ok(()) => return,
+                Err(error) => tracing::warn!(%error, "could not arm frame timer"),
+            }
+            self.use_fallback();
+        } else {
+            self.start_fallback();
+        }
+    }
+
+    pub fn use_fallback(&mut self) {
+        if let Some(timer) = self.timer.take() {
+            unsafe {
+                let _ = CancelWaitableTimer(timer);
+                let _ = CloseHandle(timer);
+            }
+        }
+        if self.active() {
+            self.start_fallback();
+        }
+    }
+
+    fn start_fallback(&mut self) {
+        let interval_ms = (self.period.as_secs_f64() * 1000.0).round() as u32;
+        self.fallback_active =
+            unsafe { SetTimer(Some(self.hwnd), TIMER_FRAME, interval_ms, None) } != 0;
+        if !self.fallback_active {
+            tracing::error!("could not start WM_TIMER for animation");
+            self.deadline = None;
+        }
+    }
+
+    pub fn stop(&mut self) {
+        if self.deadline.take().is_some() {
+            unsafe {
+                if let Some(timer) = self.timer {
+                    let _ = CancelWaitableTimer(timer);
+                }
+                if self.fallback_active {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_FRAME);
+                }
+            }
+            self.fallback_active = false;
+        }
     }
 }
 
-/// Best-effort timer interval for a compositor refresh rate.
-///
-/// `SetTimer` is not a high-resolution timer, so this is a sampling-density
-/// hint only: the animation timelines themselves are absolute-time based.
-#[must_use]
-pub fn frame_interval_ms(refresh_hz: u32) -> u32 {
-    let hz = refresh_hz.clamp(30, 360);
-    (1000.0 / f64::from(hz)).round().clamp(6.0, 16.0) as u32
+impl Drop for FrameScheduler {
+    fn drop(&mut self) {
+        self.stop();
+        self.use_fallback();
+    }
+}
+
+fn period(hz: u32) -> Duration {
+    Duration::from_secs_f64(1.0 / f64::from(hz.max(1)))
+}
+
+fn next_deadline(deadline: Instant, period: Duration, now: Instant) -> Instant {
+    if now < deadline {
+        return deadline;
+    }
+    let late = now.duration_since(deadline);
+    let remainder = Duration::from_nanos((late.as_nanos() % period.as_nanos()) as u64);
+    now + period - remainder
 }
 
 #[cfg(test)]
@@ -52,11 +174,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn frame_intervals_follow_common_refresh_rates() {
-        assert_eq!(frame_interval_ms(60), 16);
-        assert_eq!(frame_interval_ms(120), 8);
-        assert_eq!(frame_interval_ms(144), 7);
-        assert_eq!(frame_interval_ms(240), 6);
-        assert_eq!(frame_interval_ms(0), 16);
+    fn deadline_stays_on_the_original_cadence_and_skips_expired_slots() {
+        let first = Instant::now();
+        let interval = period(144);
+        assert_eq!(next_deadline(first, interval, first), first + interval);
+        assert_eq!(
+            next_deadline(
+                first,
+                interval,
+                first + 4 * interval + Duration::from_millis(2)
+            ),
+            first + 5 * interval,
+        );
     }
 }

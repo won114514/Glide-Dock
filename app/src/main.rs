@@ -5,6 +5,7 @@
 mod app;
 mod guard;
 mod launcher;
+mod presenter;
 mod preview;
 mod render_loop;
 mod wndproc;
@@ -25,13 +26,13 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, FindWindowW, GetMessageW, MSG, SMTO_ABORTIFHUNG, SendMessageTimeoutW,
-    TranslateMessage,
+    DestroyWindow, DispatchMessageW, FindWindowW, GWLP_USERDATA, GetMessageW, MSG,
+    SMTO_ABORTIFHUNG, SendMessageTimeoutW, SetWindowLongPtrW, TranslateMessage,
 };
 use windows::core::PCWSTR;
 
 use crate::app::{DockApp, WM_APP_OPEN_SETTINGS};
-use crate::wndproc::dock_wndproc;
+use crate::wndproc::{DockWindowState, dock_wndproc};
 
 fn main() -> std::process::ExitCode {
     let options = match Options::parse(std::env::args().skip(1).collect()) {
@@ -217,39 +218,23 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         Ok(app) => app,
         Err(error) => {
             unsafe {
-                let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+                let _ = DestroyWindow(hwnd);
             }
             return Err(Box::new(error));
         }
     };
-    let app_pointer = Box::into_raw(Box::new(app));
+    let window = Box::new(DockWindowState::new(hwnd, app));
     unsafe {
-        windows::Win32::UI::WindowsAndMessaging::SetWindowLongPtrW(
+        SetWindowLongPtrW(
             hwnd,
-            windows::Win32::UI::WindowsAndMessaging::GWLP_USERDATA,
-            app_pointer as isize,
+            GWLP_USERDATA,
+            std::ptr::from_ref(window.as_ref()) as isize,
         );
     }
 
-    if !options.selftest && options.open_settings {
-        unsafe {
-            (*app_pointer).show_settings();
-        }
-    }
-
-    if !options.selftest
-        && let Err(error) = guard::spawn(&guard_config, options.autostart)
-    {
-        tracing::warn!(%error, "could not start dock guard");
-    }
-
-    if options.selftest {
-        let passed = unsafe { (*app_pointer).selftest() };
-        unsafe {
-            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
-            let mut app = Box::from_raw(app_pointer);
-            app.shutdown_without_save();
-        }
+    let result = if options.selftest {
+        let passed = window.app.borrow_mut().selftest();
+        window.app.borrow_mut().shutdown_without_save();
         if passed {
             println!("selftest: OK");
             Ok(())
@@ -257,13 +242,21 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
             Err("selftest failed".into())
         }
     } else {
-        message_loop();
-        unsafe {
-            let mut app = Box::from_raw(app_pointer);
-            app.shutdown();
+        if options.open_settings {
+            window.app.borrow_mut().show_settings();
         }
+        if let Err(error) = guard::spawn(&guard_config, options.autostart) {
+            tracing::warn!(%error, "could not start dock guard");
+        }
+        message_loop(&window);
+        window.app.borrow_mut().shutdown();
         Ok(())
+    };
+    unsafe {
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        let _ = DestroyWindow(hwnd);
     }
+    result
 }
 
 fn request_settings_from_running_instance() {
@@ -290,11 +283,45 @@ fn request_settings_from_running_instance() {
     }
 }
 
-fn message_loop() {
+fn message_loop(window: &DockWindowState) {
+    use windows::Win32::Foundation::{WAIT_FAILED, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::INFINITE;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_ALLINPUT,
+        WM_QUIT,
+    };
+
     let mut message = MSG::default();
+    let app = &window.app;
     loop {
-        let result = unsafe { GetMessageW(&mut message, None, 0, 0) };
-        if result.0 <= 0 {
+        window.apply_display_change();
+        // No DockApp borrow may span a call that dispatches window messages.
+        let wait_handle = app.borrow().frame_wait_handle();
+        if let Some(timer) = wait_handle {
+            let ready = unsafe {
+                MsgWaitForMultipleObjectsEx(
+                    Some(&[timer]),
+                    INFINITE,
+                    QS_ALLINPUT,
+                    MWMO_INPUTAVAILABLE,
+                )
+            };
+            if ready == WAIT_OBJECT_0 {
+                app.borrow_mut().on_frame();
+                continue;
+            }
+            if ready == WAIT_FAILED {
+                tracing::warn!("frame wait failed; using WM_TIMER");
+                app.borrow_mut().use_frame_timer_fallback();
+                continue;
+            }
+            if !unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+                continue;
+            }
+            if message.message == WM_QUIT {
+                break;
+            }
+        } else if unsafe { GetMessageW(&mut message, None, 0, 0) }.0 <= 0 {
             break;
         }
         unsafe {

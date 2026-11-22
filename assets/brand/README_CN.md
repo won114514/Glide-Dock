@@ -1,21 +1,34 @@
-# Glide-Dock 品牌资源包
+# Glide-Dock 标志资源
 
-本压缩包包含 Glide-Dock 的 Logo、应用图标、Windows ICO 文件和品牌展示图。
+标志以开放式 G 为主体，使用几何轮廓、斜切横笔与青蓝渐变。矢量稿使用透明背景，不包含外框、位图、阴影滤镜或字体依赖。
 
-## 目录
+## 矢量源文件
 
-- `01-Logo/`：图形标志、横版 Logo（PNG / SVG）
-- `02-App-Icons/`：FullColor、Dark、Light、Mono 四种版本，各含 1024、512、256、128、64 五种 PNG 尺寸
-- `03-Windows-ICO/`：Windows ICO 图标（含 256、128、64、48、32、24、16 多尺寸）
-- `04-Showcase/`：品牌视觉展示图与 Dock 预览图
-- `05-Source/`：独立图标母版
+- `05-Source/Glide-Dock-Mark.svg`：G 图形的唯一母版。
+- `05-Source/Glide-Dock-Wordmark.svg`：已转换为矢量路径的 Glide-Dock 字标。
+- `01-Logo/Glide-Dock-Logo-Symbol.svg`：供安装器和 Slint 设置中心直接使用的 SVG。
+- `01-Logo/Glide-Dock-Logo-Horizontal.svg`：横版组合标志，字标随系统深浅色偏好调整颜色。
 
-## 使用建议
+## 原生图标
 
-- Windows 应用图标：优先使用 `03-Windows-ICO/Glide-Dock-FullColor.ico`。
-- PNG 素材：按实际界面和缩放场景选择对应尺寸。
-- SVG 横版 Logo：文字部分为矢量，图形标志以 PNG 内嵌。
+PNG 与 Windows ICO 均从同一份 SVG 直接按目标尺寸渲染，保留透明通道。
+PNG 提供 16、20、24、32、40、48、64、96、128、256、512、1024 像素；ICO 内含 16–256 像素的十个尺寸。
+FullColor 用于默认应用图标，Light/Dark 为背景适配版本；Mono SVG 使用 currentColor。
+05-Source 仅保留 SVG 源文件。01-Logo 中的横版 PNG 从新版 SVG 生成，供 WinUI 安装器使用。
 
-## 说明
+## 重新生成
 
-图标尺寸文件由独立母版等比缩放导出；Dark、Light、Mono 为配色适配版本。品牌展示图属于概念展示素材，不应直接当作单独图标文件使用。
+在 installer/ui 中安装开发依赖及 Playwright Chromium 后运行：
+
+```powershell
+npm run brand:build
+```
+
+也可指定现有浏览器：
+
+```powershell
+npm run brand:build -- --browser "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"
+```
+
+生成脚本同时更新旧设置项目使用的 ICO/PNG，并校验透明角落、黑色边缘和输出尺寸。
+04-Showcase/Glide-Dock-Brand-Preview.png 为当前设计预览，同时用于 WinUI 安装器的欢迎页面。

@@ -13,8 +13,10 @@ dock-platform-windows.workspace = true
 dock-storage.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+semver = "=1.0.28"
 tracing.workspace = true
 tauri = { version = "=2.12.7", default-features = false, features = ["wry", "custom-protocol", "compression", "common-controls-v6"] }
+webview2-com = "=0.39.1"
 windows.workspace = true
 zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
 

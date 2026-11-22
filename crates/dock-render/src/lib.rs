@@ -1,17 +1,17 @@
-//! Glide-Dock CPU renderer.
-//!
-//! The renderer is deliberately free of Win32: it consumes a [`DockScene`] and
-//! produces a premultiplied RGBA [`Pixmap`]. The same code path is used for the
-//! live layered window and for offline PNG previews.
+//! Glide-Dock scene preparation and tiny-skia renderer for live and offline frames.
 
 #![warn(missing_docs)]
 
+mod frame;
 pub mod icons;
 pub mod painter;
 pub mod preview;
 pub mod text;
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+
+pub use frame::{DockFrame, DrawCommand, HitShape, MenuOverlay};
 
 use dock_core::layout::tooltip_rect;
 use dock_core::models::DockConfig;
@@ -20,9 +20,9 @@ use dock_core::theme::{Color as ThemeColor, Palette};
 use dock_core::{
     DockGeometry, DockItem, DockState, FrameLayout, Metrics, Point, Rect, RippleMotion, Size,
 };
-use tiny_skia::{BlendMode, Color, FilterQuality, Pixmap, PixmapPaint, PixmapRef, Transform};
+use tiny_skia::{Color, FilterQuality, Pixmap, PixmapPaint, Transform};
 
-use crate::icons::{IconSource, draw_unresolved_badge};
+use crate::icons::IconSource;
 use crate::painter::MenuGlyph;
 use crate::text::{FontStack, Weight};
 
@@ -174,10 +174,10 @@ fn animated_icon_rect(base: Rect, animation: IconAnimation) -> Rect {
     }
 }
 
-fn draw_status_dot(pixmap: &mut Pixmap, icon: Rect, dpi_scale: f32, color: dock_core::Color) {
+fn draw_status_dot(frame: &mut DockFrame, icon: Rect, dpi_scale: f32, color: dock_core::Color) {
     let radius = 2.0 * dpi_scale;
     let center = (icon.center().x, icon.bottom() + 5.0 * dpi_scale + radius);
-    painter::filled_circle(pixmap, center, radius, painter::color(color));
+    frame.filled_circle(center, radius, color);
 }
 
 /// A menu render input.
@@ -217,7 +217,50 @@ struct ShadowKey {
     blur: u32,
     offset: i32,
     color: u32,
-    hollow: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum RasterKey {
+    Text {
+        text: String,
+        size: u32,
+        color: [u8; 3],
+        weight: Weight,
+    },
+    Placeholder {
+        id: u32,
+        kind: u8,
+        label: String,
+        path: String,
+        unresolved: bool,
+    },
+}
+
+#[derive(Default)]
+struct RasterCache {
+    assets: HashMap<RasterKey, Arc<Pixmap>>,
+    order: VecDeque<RasterKey>,
+}
+
+impl RasterCache {
+    fn get_or_render(
+        &mut self,
+        key: RasterKey,
+        render: impl FnOnce() -> Option<Pixmap>,
+    ) -> Option<Arc<Pixmap>> {
+        if let Some(pixels) = self.assets.get(&key) {
+            return Some(Arc::clone(pixels));
+        }
+        let pixels = Arc::new(render()?);
+        if self.order.len() >= 256
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.assets.remove(&oldest);
+        }
+        self.order.push_back(key.clone());
+        self.assets.insert(key, Arc::clone(&pixels));
+        Some(pixels)
+    }
 }
 
 /// Start-menu artwork style selected from the host Windows version.
@@ -235,6 +278,7 @@ pub struct Renderer {
     fonts: FontStack,
     shadow_cache: Option<ShadowCache>,
     start_style: StartMenuStyle,
+    raster_cache: RasterCache,
 }
 
 impl Default for Renderer {
@@ -251,6 +295,7 @@ impl Renderer {
             fonts: FontStack::system(),
             shadow_cache: None,
             start_style: StartMenuStyle::Windows11,
+            raster_cache: RasterCache::default(),
         }
     }
 
@@ -266,6 +311,7 @@ impl Renderer {
             fonts,
             shadow_cache: None,
             start_style: StartMenuStyle::Windows11,
+            raster_cache: RasterCache::default(),
         }
     }
 
@@ -278,84 +324,186 @@ impl Renderer {
     /// Renders the dock into a transparent window-sized pixmap.
     #[must_use]
     pub fn render_dock(&mut self, scene: &DockScene<'_>) -> Option<Pixmap> {
+        let frame = self.prepare_frame(scene, None);
+        self.render_frame(&frame)
+    }
+
+    /// Builds the ordered draw commands and the input geometry once per frame.
+    #[must_use]
+    pub fn prepare_frame(
+        &mut self,
+        scene: &DockScene<'_>,
+        menu: Option<MenuOverlay<'_>>,
+    ) -> DockFrame {
         let width = scene.geometry.window.width.ceil().max(1.0) as u32;
         let height = scene.geometry.window.height.ceil().max(1.0) as u32;
-        let mut pixmap = Pixmap::new(width, height)?;
+        let mut frame = DockFrame::new(width, height);
         let dock = scene.layout.dock;
         let radius = scene.geometry.radius;
-
-        if !(scene.glass && scene.native_glass) {
-            self.draw_dock_shadow(&mut pixmap, scene, dock, radius);
-        }
-
-        let (top, bottom) = scene
-            .palette
-            .dock_background(scene.config.appearance.opacity);
+        let margin = 6.0 * scene.metrics.scale;
+        frame.hit_shape(dock.inset(-margin), radius + margin);
         let frosted = scene.glass && scene.native_glass;
-        if !frosted {
-            painter::fill_rounded_vertical(
-                &mut pixmap,
-                dock,
-                radius,
-                painter::color(top),
-                painter::color(bottom),
-            );
+        if frosted {
+            // Keep the CPU layered surface interactive over native glass.
+            frame.fill_rounded(dock, radius, ThemeColor::rgba(0, 0, 0, 1));
         } else {
-            // A layered window uses per-pixel alpha for hit testing. The
-            // composition glass lives in a window below, so the dock layer
-            // itself must keep at least alpha 1 over the glass area; otherwise
-            // the whole bar is click-through and neither hover nor the
-            // background context menu can ever fire.
-            painter::fill_rounded(&mut pixmap, dock, radius, Color::from_rgba8(0, 0, 0, 1));
-        }
-
-        // Inner shading is only part of the gradient fallback; the native
-        // composition glass carries its own tint and must stay transparent.
-        if !frosted {
-            let inner = dock.inset(1.0);
-            painter::fill_rounded_vertical(
-                &mut pixmap,
-                inner,
+            let scale = scene.metrics.scale;
+            frame.commands.push(DrawCommand::Shadow {
+                rect: dock,
+                radius,
+                blur: 15.0 * scale,
+                offset: 5.0 * scale,
+                color: scene.palette.shadow,
+                dock: true,
+            });
+            let (top, bottom) = scene
+                .palette
+                .dock_background(scene.config.appearance.opacity);
+            frame.fill_rounded_vertical(dock, radius, top, bottom);
+            frame.fill_rounded_vertical(
+                dock.inset(1.0),
                 (radius - 1.0).max(0.0),
-                Color::from_rgba8(0, 0, 0, 0),
-                painter::color(scene.palette.dock_inner_shadow),
+                ThemeColor::TRANSPARENT,
+                scene.palette.dock_inner_shadow,
             );
-        }
-
-        if !frosted {
-            painter::stroke_rounded(
-                &mut pixmap,
+            frame.stroke_rounded(
                 dock.inset(0.5),
                 (radius - 0.5).max(0.0),
                 1.0,
-                painter::color(scene.palette.dock_border),
+                scene.palette.dock_border,
             );
         }
 
         if scene.geometry.is_empty() {
-            self.draw_empty_state(&mut pixmap, scene, dock);
-            return Some(pixmap);
+            self.draw_empty_state(&mut frame, scene, dock);
+        } else {
+            self.draw_hover_backdrop(&mut frame, scene);
+            self.draw_items(&mut frame, scene);
+            self.draw_drag(&mut frame, scene);
+            self.draw_tooltip(&mut frame, scene);
+            self.draw_error(&mut frame, scene);
         }
+        if let Some(menu) = menu {
+            if let Some(hit) = menu.hit {
+                frame.hit_shapes.push(hit);
+            }
+            frame.bitmap(
+                Arc::clone(menu.pixels),
+                Transform::from_translate(menu.position.x, menu.position.y),
+                menu.opacity,
+            );
+        }
+        frame
+    }
 
-        self.draw_hover_backdrop(&mut pixmap, scene);
-        self.draw_items(&mut pixmap, scene);
-        self.draw_drag(&mut pixmap, scene);
-        self.draw_tooltip(&mut pixmap, scene);
-        self.draw_error(&mut pixmap, scene);
+    /// Executes the prepared frame with tiny-skia.
+    #[must_use]
+    pub fn render_frame(&mut self, frame: &DockFrame) -> Option<Pixmap> {
+        let mut pixmap = Pixmap::new(frame.width, frame.height)?;
+        for command in &frame.commands {
+            match *command {
+                DrawCommand::Fill {
+                    rect,
+                    radius,
+                    color,
+                } => painter::fill_rounded(&mut pixmap, rect, radius, painter::color(color)),
+                DrawCommand::Vertical {
+                    rect,
+                    radius,
+                    top,
+                    bottom,
+                } => painter::fill_rounded_vertical(
+                    &mut pixmap,
+                    rect,
+                    radius,
+                    painter::color(top),
+                    painter::color(bottom),
+                ),
+                DrawCommand::Stroke {
+                    rect,
+                    radius,
+                    width,
+                    color,
+                } => {
+                    painter::stroke_rounded(&mut pixmap, rect, radius, width, painter::color(color))
+                }
+                DrawCommand::Line {
+                    from,
+                    to,
+                    width,
+                    color,
+                } => painter::line(&mut pixmap, from, to, width, painter::color(color)),
+                DrawCommand::Circle {
+                    center,
+                    radius,
+                    stroke: Some(width),
+                    color,
+                } => painter::stroke_circle(
+                    &mut pixmap,
+                    center,
+                    radius,
+                    width,
+                    painter::color(color),
+                ),
+                DrawCommand::Circle {
+                    center,
+                    radius,
+                    stroke: None,
+                    color,
+                } => painter::filled_circle(&mut pixmap, center, radius, painter::color(color)),
+                DrawCommand::Polygon { ref points, color } => {
+                    painter::filled_polygon(&mut pixmap, points, painter::color(color))
+                }
+                DrawCommand::Glow {
+                    rect,
+                    spread,
+                    color,
+                    strength,
+                } => painter::glow(&mut pixmap, rect, spread, color, strength),
+                DrawCommand::Shadow {
+                    rect,
+                    radius,
+                    blur,
+                    offset,
+                    color,
+                    dock,
+                } => {
+                    if dock {
+                        self.draw_dock_shadow(&mut pixmap, rect, radius, blur, offset, color);
+                    } else {
+                        painter::shadow(&mut pixmap, rect, radius, blur, offset, color);
+                    }
+                }
+                DrawCommand::Bitmap {
+                    ref pixels,
+                    transform,
+                    opacity,
+                } => {
+                    let paint = PixmapPaint {
+                        opacity,
+                        quality: if transform.is_translate() {
+                            FilterQuality::Nearest
+                        } else {
+                            FilterQuality::Bilinear
+                        },
+                        ..PixmapPaint::default()
+                    };
+                    pixmap.draw_pixmap(0, 0, pixels.as_ref().as_ref(), &paint, transform, None);
+                }
+            }
+        }
         Some(pixmap)
     }
 
     fn draw_dock_shadow(
         &mut self,
         pixmap: &mut Pixmap,
-        scene: &DockScene<'_>,
         dock: Rect,
         radius: f32,
+        blur: f32,
+        offset: f32,
+        color: ThemeColor,
     ) {
-        let scale = scene.metrics.scale;
-        let blur = 15.0 * scale;
-        let offset = 5.0 * scale;
-        let color = scene.palette.shadow;
         let key = ShadowKey {
             width: pixmap.width(),
             height: pixmap.height(),
@@ -367,58 +515,36 @@ impl Renderer {
             blur: (blur / 2.0).round() as u32,
             offset: (offset / 2.0).round() as i32,
             color: u32::from_be_bytes([color.r, color.g, color.b, color.a]),
-            hollow: scene.glass && scene.native_glass,
         };
-        let cached = self
+        if self
             .shadow_cache
             .as_ref()
-            .filter(|cache| cache.key == key)
-            .map(|cache| cache.pixmap.as_ref());
-        let shadow_ref = match cached {
-            Some(cached) => Some(cached),
-            None => {
-                let layer = if scene.glass && scene.native_glass {
-                    painter::shadow_layer_outside(
-                        pixmap.width(),
-                        pixmap.height(),
-                        dock,
-                        radius,
-                        blur,
-                        offset,
-                        color,
-                    )
-                } else {
-                    painter::shadow_layer(
-                        pixmap.width(),
-                        pixmap.height(),
-                        dock,
-                        radius,
-                        blur,
-                        offset,
-                        color,
-                    )
-                };
-                if let Some(layer) = layer {
-                    self.shadow_cache = Some(ShadowCache { key, pixmap: layer });
-                    self.shadow_cache
-                        .as_ref()
-                        .map(|cache| cache.pixmap.as_ref())
-                } else {
-                    None
-                }
-            }
-        };
-        if let Some(shadow) = shadow_ref {
-            let paint = PixmapPaint {
-                opacity: 1.0,
-                blend_mode: BlendMode::SourceOver,
-                quality: FilterQuality::Nearest,
-            };
-            pixmap.draw_pixmap(0, 0, shadow, &paint, Transform::identity(), None);
+            .is_none_or(|cache| cache.key != key)
+        {
+            self.shadow_cache = painter::shadow_layer(
+                pixmap.width(),
+                pixmap.height(),
+                dock,
+                radius,
+                blur,
+                offset,
+                color,
+            )
+            .map(|pixmap| ShadowCache { key, pixmap });
+        }
+        if let Some(shadow) = &self.shadow_cache {
+            pixmap.draw_pixmap(
+                0,
+                0,
+                shadow.pixmap.as_ref(),
+                &PixmapPaint::default(),
+                Transform::identity(),
+                None,
+            );
         }
     }
 
-    fn draw_hover_backdrop(&self, pixmap: &mut Pixmap, scene: &DockScene<'_>) {
+    fn draw_hover_backdrop(&self, frame: &mut DockFrame, scene: &DockScene<'_>) {
         let scale = scene.metrics.scale;
         let Some(index) = scene.state.hovered else {
             return;
@@ -442,15 +568,14 @@ impl Renderer {
         );
         let backdrop = icon.inset(-3.5 * scale);
         let alpha = (f32::from(scene.palette.hover.a) * progress).round() as u8;
-        painter::fill_rounded(
-            pixmap,
+        frame.fill_rounded(
             backdrop,
             13.0 * scale,
-            painter::color(scene.palette.hover.with_alpha(alpha)),
+            scene.palette.hover.with_alpha(alpha),
         );
     }
 
-    fn draw_items(&self, pixmap: &mut Pixmap, scene: &DockScene<'_>) {
+    fn draw_items(&mut self, frame: &mut DockFrame, scene: &DockScene<'_>) {
         let scale = scene.metrics.scale;
         let drag_index = scene.drag.filter(|drag| drag.active).map(|drag| drag.index);
         for (index, item) in scene.config.items.iter().enumerate() {
@@ -459,10 +584,11 @@ impl Renderer {
             };
             let animation = scene.animations.get(index).copied().unwrap_or_default();
             let rect = animated_icon_rect(base, animation);
+            frame.hit_shape(base, 0.0);
             let opacity = if drag_index == Some(index) { 0.32 } else { 1.0 };
             if item.kind == dock_core::ItemKind::Separator {
                 Self::draw_separator(
-                    pixmap,
+                    frame,
                     rect,
                     scene.palette.dock_border.with_alpha(110),
                     scale,
@@ -471,12 +597,11 @@ impl Renderer {
                 continue;
             }
             if item.kind == dock_core::ItemKind::Widget {
-                self.draw_start_widget(pixmap, rect, opacity);
+                self.draw_start_widget(frame, rect, opacity);
                 continue;
             }
             if animation.glow > 0.001 {
-                painter::glow(
-                    pixmap,
+                frame.glow(
                     rect,
                     10.0 * scale,
                     scene.palette.motion_accent,
@@ -485,33 +610,32 @@ impl Renderer {
             }
             if let Some(ripple) = animation.ripple {
                 let alpha = (ripple.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
-                painter::stroke_circle(
-                    pixmap,
+                frame.stroke_circle(
                     (rect.center().x, rect.center().y),
                     ripple.radius,
                     ripple.width,
-                    painter::color(scene.palette.motion_accent.with_alpha(alpha)),
+                    scene.palette.motion_accent.with_alpha(alpha),
                 );
             }
-            self.draw_icon(pixmap, scene, item, rect, opacity, animation);
+            self.draw_icon(frame, scene, item, rect, opacity, animation);
 
             if scene.config.behavior.show_running_indicator {
                 if let Some(waiting) = animation.waiting {
                     draw_status_dot(
-                        pixmap,
+                        frame,
                         rect,
                         scale,
                         scene.palette.accent.scale_alpha(waiting * 0.8),
                     );
                 } else if scene.state.is_running(item.id) && animation.running_dot_allowed {
-                    draw_status_dot(pixmap, rect, scale, scene.palette.accent);
+                    draw_status_dot(frame, rect, scale, scene.palette.accent);
                 }
             }
         }
     }
 
     fn draw_separator(
-        pixmap: &mut Pixmap,
+        frame: &mut DockFrame,
         rect: Rect,
         color: ThemeColor,
         scale: f32,
@@ -521,22 +645,21 @@ impl Renderer {
         let height = (rect.height * 0.58).max(1.0);
         let x = rect.center().x - width / 2.0;
         let y = rect.center().y - height / 2.0;
-        painter::fill_rounded(
-            pixmap,
+        frame.fill_rounded(
             Rect::new(x, y, width, height),
             width / 2.0,
-            painter::color(color.scale_alpha(opacity)),
+            color.scale_alpha(opacity),
         );
     }
 
-    fn draw_start_widget(&self, pixmap: &mut Pixmap, rect: Rect, opacity: f32) {
+    fn draw_start_widget(&self, frame: &mut DockFrame, rect: Rect, opacity: f32) {
         // Exact geometry from the supplied icons8 SVGs (48×48 viewBox):
         // Windows 11 = four #1976D2 squares; Windows 10 = four #00B0FF
         // slanted panes. No white app tile is drawn.
         let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let (color, polygons): (Color, &[&[(f32, f32)]]) = match self.start_style {
+        let (color, polygons): (ThemeColor, &[&[(f32, f32)]]) = match self.start_style {
             StartMenuStyle::Windows10 => (
-                Color::from_rgba8(0, 176, 255, alpha),
+                ThemeColor::rgba(0, 176, 255, alpha),
                 &[
                     &[
                         (20.0, 25.026),
@@ -555,7 +678,7 @@ impl Renderer {
                 ],
             ),
             StartMenuStyle::Windows11 => (
-                Color::from_rgba8(25, 118, 210, alpha),
+                ThemeColor::rgba(25, 118, 210, alpha),
                 &[
                     &[(6.0, 6.0), (23.0, 6.0), (23.0, 23.0), (6.0, 23.0)],
                     &[(25.042, 6.0), (42.0, 6.0), (42.0, 22.958), (25.042, 22.958)],
@@ -570,13 +693,13 @@ impl Renderer {
                 .iter()
                 .map(|(x, y)| (rect.x + x * scale, rect.y + y * scale))
                 .collect();
-            painter::filled_polygon(pixmap, &points, color);
+            frame.filled_polygon(&points, color);
         }
     }
 
     fn draw_icon(
-        &self,
-        pixmap: &mut Pixmap,
+        &mut self,
+        frame: &mut DockFrame,
         scene: &DockScene<'_>,
         item: &DockItem,
         rect: Rect,
@@ -584,12 +707,12 @@ impl Renderer {
         animation: IconAnimation,
     ) {
         if item.kind == dock_core::ItemKind::Widget {
-            self.draw_start_widget(pixmap, rect, opacity);
+            self.draw_start_widget(frame, rect, opacity);
             return;
         }
         if item.kind == dock_core::ItemKind::Separator {
             Self::draw_separator(
-                pixmap,
+                frame,
                 rect,
                 scene.palette.dock_border.with_alpha(110),
                 scene.metrics.scale,
@@ -600,30 +723,49 @@ impl Renderer {
         let unresolved = scene.state.is_unresolved(item.id);
         if let Some(icon) = scene.icons.icon(item) {
             draw_icon_pixmap(
-                pixmap,
-                &icon,
+                frame,
+                icon,
                 rect,
                 opacity,
                 animation.tilt_x_deg,
                 animation.tilt_y_deg,
             );
             if unresolved {
-                draw_unresolved_badge(pixmap, rect);
+                draw_badge(frame, rect);
             }
         } else {
-            icons::draw_placeholder(pixmap, item, rect, &self.fonts, unresolved);
+            // Missing/extracting icons are still reusable textures.
+            let key = RasterKey::Placeholder {
+                id: item.id,
+                kind: item.kind as u8,
+                label: item.label().to_owned(),
+                path: item.target_path.clone(),
+                unresolved,
+            };
+            if let Some(pixels) = self.raster_cache.get_or_render(key, || {
+                let mut pixels = Pixmap::new(128, 128)?;
+                icons::draw_placeholder(
+                    &mut pixels,
+                    item,
+                    Rect::new(0.0, 0.0, 128.0, 128.0),
+                    &self.fonts,
+                    unresolved,
+                );
+                Some(pixels)
+            }) {
+                draw_icon_pixmap(frame, pixels, rect, 1.0, 0.0, 0.0);
+            }
             if opacity < 0.99 {
-                painter::fill_rounded(
-                    pixmap,
+                frame.fill_rounded(
                     rect,
                     rect.width * 0.23,
-                    Color::from_rgba8(10, 10, 14, ((1.0 - opacity) * 190.0) as u8),
+                    ThemeColor::rgba(10, 10, 14, ((1.0 - opacity) * 190.0) as u8),
                 );
             }
         }
     }
 
-    fn draw_drag(&self, pixmap: &mut Pixmap, scene: &DockScene<'_>) {
+    fn draw_drag(&mut self, frame: &mut DockFrame, scene: &DockScene<'_>) {
         let scale = scene.metrics.scale;
         let Some(drag) = scene.drag else {
             return;
@@ -638,18 +780,12 @@ impl Renderer {
             let height = scene.metrics.icon * 0.95;
             let y = scene.layout.dock.center().y - height / 2.0;
             let bar = Rect::new(x - 2.0 * scale, y, 4.0 * scale, height);
-            painter::fill_rounded(
-                pixmap,
+            frame.fill_rounded(
                 Rect::new(x - 7.0 * scale, y, 14.0 * scale, height),
                 7.0 * scale,
-                painter::color(scene.palette.accent.scale_alpha(0.22)),
+                scene.palette.accent.scale_alpha(0.22),
             );
-            painter::fill_rounded(
-                pixmap,
-                bar,
-                2.0 * scale,
-                painter::color(scene.palette.accent),
-            );
+            frame.fill_rounded(bar, 2.0 * scale, scene.palette.accent);
         }
 
         let Some(icon_rect) = scene.layout.icons.get(drag.index).copied() else {
@@ -662,18 +798,17 @@ impl Renderer {
             size,
             size,
         );
-        painter::shadow(
-            pixmap,
+        frame.shadow(
             floating.translate(0.0, 2.0 * scale),
             size * 0.22,
             10.0 * scale,
             5.0 * scale,
             ThemeColor::rgba(0, 0, 0, 130),
         );
-        self.draw_icon(pixmap, scene, icon, floating, 1.0, IconAnimation::default());
+        self.draw_icon(frame, scene, icon, floating, 1.0, IconAnimation::default());
     }
 
-    fn draw_tooltip(&self, pixmap: &mut Pixmap, scene: &DockScene<'_>) {
+    fn draw_tooltip(&mut self, frame: &mut DockFrame, scene: &DockScene<'_>) {
         let scale = scene.metrics.scale;
         let progress = scene.tooltip_progress.clamp(0.0, 1.0);
         if progress <= 0.01 || !scene.config.behavior.show_tooltips {
@@ -708,8 +843,7 @@ impl Renderer {
         bubble.y -= (1.0 - progress) * 6.0 * scale;
 
         let shadow_alpha = (f32::from(scene.palette.shadow.a) * progress).round() as u8;
-        painter::shadow(
-            pixmap,
+        frame.shadow(
             bubble,
             bubble.height / 2.0,
             10.0 * scale,
@@ -722,18 +856,17 @@ impl Renderer {
             ),
         );
 
-        let bg = fade(scene.palette.tooltip_bg, progress);
-        let border = fade(scene.palette.tooltip_border, progress);
+        let bg = scene.palette.tooltip_bg.scale_alpha(progress);
+        let border = scene.palette.tooltip_border.scale_alpha(progress);
         let text_color = scene.palette.tooltip_text.scale_alpha(progress);
-        painter::fill_rounded(pixmap, bubble, bubble.height / 2.0, bg);
-        painter::stroke_rounded(pixmap, bubble.inset(0.5), bubble.height / 2.0, 1.0, border);
+        frame.fill_rounded(bubble, bubble.height / 2.0, bg);
+        frame.stroke_rounded(bubble.inset(0.5), bubble.height / 2.0, 1.0, border);
 
         let arrow_center = icon.center().x.clamp(
             bubble.left() + bubble.height * 0.45,
             bubble.right() - bubble.height * 0.45,
         );
-        painter::filled_polygon(
-            pixmap,
+        frame.filled_polygon(
             &[
                 (arrow_center - 5.0 * scale, bubble.bottom() - 1.0),
                 (arrow_center + 5.0 * scale, bubble.bottom() - 1.0),
@@ -742,8 +875,8 @@ impl Renderer {
             bg,
         );
 
-        self.fonts.draw_line_centered(
-            pixmap,
+        self.draw_cached_text_centered(
+            frame,
             &label,
             bubble.center().x,
             bubble.center().y,
@@ -753,7 +886,7 @@ impl Renderer {
         );
     }
 
-    fn draw_error(&self, pixmap: &mut Pixmap, scene: &DockScene<'_>) {
+    fn draw_error(&mut self, frame: &mut DockFrame, scene: &DockScene<'_>) {
         let scale = scene.metrics.scale;
         let progress = scene.error_progress.clamp(0.0, 1.0);
         if progress <= 0.01 {
@@ -790,29 +923,26 @@ impl Renderer {
         let y = scene.layout.dock.top() - 12.0 * scale - height + (1.0 - progress) * 6.0 * scale;
         let bubble = Rect::new(x, y, width, height);
 
-        painter::shadow(
-            pixmap,
+        frame.shadow(
             bubble,
             height / 2.0,
             12.0 * scale,
             4.0 * scale,
             ThemeColor::rgba(0, 0, 0, (120.0 * progress) as u8),
         );
-        painter::fill_rounded(
-            pixmap,
+        frame.fill_rounded(
             bubble,
             height / 2.0,
-            fade(scene.palette.error_bg, progress),
+            scene.palette.error_bg.scale_alpha(progress),
         );
-        painter::stroke_rounded(
-            pixmap,
+        frame.stroke_rounded(
             bubble.inset(0.5),
             height / 2.0,
             1.0,
-            fade(scene.palette.error_text.scale_alpha(0.35), progress),
+            scene.palette.error_text.scale_alpha(0.35 * progress),
         );
-        self.fonts.draw_line_centered(
-            pixmap,
+        self.draw_cached_text_centered(
+            frame,
             &label,
             bubble.center().x,
             bubble.center().y,
@@ -822,15 +952,14 @@ impl Renderer {
         );
     }
 
-    fn draw_empty_state(&self, pixmap: &mut Pixmap, scene: &DockScene<'_>, dock: Rect) {
+    fn draw_empty_state(&mut self, frame: &mut DockFrame, scene: &DockScene<'_>, dock: Rect) {
         let scale = scene.metrics.scale;
         let radius = scene.geometry.radius;
-        painter::stroke_rounded(
-            pixmap,
+        frame.stroke_rounded(
             dock.inset(6.0 * scale),
             (radius - 4.0 * scale).max(2.0),
             1.0,
-            painter::color(scene.palette.empty_border.scale_alpha(0.8)),
+            scene.palette.empty_border.scale_alpha(0.8),
         );
 
         let title = "拖入应用或快捷方式";
@@ -847,31 +976,27 @@ impl Renderer {
         let center_y = dock.center().y;
         let badge_rect = Rect::new(start, center_y - badge / 2.0, badge, badge);
 
-        painter::fill_rounded(
-            pixmap,
+        frame.fill_rounded(
             badge_rect,
             badge * 0.31,
-            painter::color(scene.palette.accent.scale_alpha(0.14)),
+            scene.palette.accent.scale_alpha(0.14),
         );
-        painter::stroke_rounded(
-            pixmap,
+        frame.stroke_rounded(
             badge_rect.inset(0.5),
             badge * 0.31,
             1.0,
-            painter::color(scene.palette.accent.scale_alpha(0.30)),
+            scene.palette.accent.scale_alpha(0.30),
         );
         let plus_center = badge_rect.center();
         let arm = badge * 0.17;
-        let plus_color = painter::color(scene.palette.accent);
-        painter::line(
-            pixmap,
+        let plus_color = scene.palette.accent;
+        frame.line(
             (plus_center.x - arm, plus_center.y),
             (plus_center.x + arm, plus_center.y),
             1.8 * scale,
             plus_color,
         );
-        painter::line(
-            pixmap,
+        frame.line(
             (plus_center.x, plus_center.y - arm),
             (plus_center.x, plus_center.y + arm),
             1.8 * scale,
@@ -883,8 +1008,8 @@ impl Renderer {
             let title_baseline = self
                 .fonts
                 .centered_baseline(center_y - 9.0 * scale, title_size);
-            self.fonts.draw(
-                pixmap,
+            self.draw_cached_text(
+                frame,
                 title,
                 text_x,
                 title_baseline,
@@ -895,8 +1020,8 @@ impl Renderer {
             let subtitle_baseline = self
                 .fonts
                 .centered_baseline(center_y + 11.0 * scale, subtitle_size);
-            self.fonts.draw(
-                pixmap,
+            self.draw_cached_text(
+                frame,
                 subtitle,
                 text_x,
                 subtitle_baseline,
@@ -904,6 +1029,67 @@ impl Renderer {
                 scene.palette.text_faint,
                 Weight::Regular,
             );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_cached_text_centered(
+        &mut self,
+        frame: &mut DockFrame,
+        text: &str,
+        x: f32,
+        y: f32,
+        size: f32,
+        color: ThemeColor,
+        weight: Weight,
+    ) {
+        let width = self.fonts.measure(text, size, weight);
+        let baseline = self.fonts.centered_baseline(y, size);
+        self.draw_cached_text(frame, text, x - width / 2.0, baseline, size, color, weight);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_cached_text(
+        &mut self,
+        frame: &mut DockFrame,
+        text: &str,
+        x: f32,
+        baseline: f32,
+        size: f32,
+        color: ThemeColor,
+        weight: Weight,
+    ) {
+        if text.is_empty() || color.a == 0 || !self.fonts.is_available() {
+            return;
+        }
+        let color_rgb = [color.r, color.g, color.b];
+        let key = RasterKey::Text {
+            text: text.to_owned(),
+            size: size.to_bits(),
+            color: color_rgb,
+            weight,
+        };
+        // Allow room for glyph overhang and keep baselines on pixel boundaries.
+        let pad = size.ceil() as u32;
+        if let Some(pixels) = self.raster_cache.get_or_render(key, || {
+            let width = self.fonts.measure(text, size, weight).ceil() as u32;
+            let mut pixels = Pixmap::new(width + 2 * pad, 3 * pad)?;
+            self.fonts.draw(
+                &mut pixels,
+                text,
+                pad as f32,
+                (2 * pad) as f32,
+                size,
+                color.with_alpha(255),
+                weight,
+            );
+            Some(pixels)
+        }) {
+            let transform = Transform::from_translate(
+                x.round() - pad as f32,
+                baseline.round() - (2 * pad) as f32,
+            );
+            frame.bitmap(pixels, transform, f32::from(color.a) / 255.0);
         }
     }
 
@@ -1057,36 +1243,41 @@ impl Renderer {
 }
 
 fn draw_icon_pixmap(
-    pixmap: &mut Pixmap,
-    icon: &Arc<Pixmap>,
+    frame: &mut DockFrame,
+    icon: Arc<Pixmap>,
     rect: Rect,
     opacity: f32,
     tilt_x_deg: f32,
     tilt_y_deg: f32,
 ) {
-    let source: PixmapRef = icon.as_ref().as_ref();
-    let source_width = source.width() as f32;
-    let source_height = source.height() as f32;
-    if source_width <= 0.0 || source_height <= 0.0 {
-        return;
-    }
-    // `GetImage` preserves the source aspect ratio; stretch it into the square
-    // slot only when the source is square, otherwise letterbox it so wide or
-    // tall icons are not distorted.
-    let scale = (rect.width / source_width).min(rect.height / source_height);
-    let width = source_width * scale;
-    let height = source_height * scale;
-    let target = Rect::new(
-        rect.center().x - width / 2.0,
-        rect.center().y - height / 2.0,
-        width,
-        height,
+    // Preserve aspect ratio for non-square shell icons.
+    let scale = (rect.width / icon.width() as f32).min(rect.height / icon.height() as f32);
+    let target = Rect::from_center(
+        rect.center(),
+        icon.width() as f32 * scale,
+        icon.height() as f32 * scale,
     );
-    painter::draw_scaled_tilted(pixmap, source, target, opacity, tilt_x_deg, tilt_y_deg);
+    let transform =
+        painter::bitmap_transform(icon.width(), icon.height(), target, tilt_x_deg, tilt_y_deg);
+    frame.bitmap(icon, transform, opacity);
 }
 
-fn fade(value: ThemeColor, progress: f32) -> Color {
-    painter::color(value.scale_alpha(progress.clamp(0.0, 1.0)))
+fn draw_badge(frame: &mut DockFrame, rect: Rect) {
+    let radius = rect.width * 0.11;
+    let center = (
+        rect.right() - rect.width * 0.16,
+        rect.y + rect.height * 0.16,
+    );
+    frame.filled_circle(center, radius + 1.2, ThemeColor::rgba(20, 20, 24, 190));
+    frame.filled_circle(center, radius, ThemeColor::rgb(245, 166, 35));
+    let color = ThemeColor::rgba(38, 28, 10, 240);
+    frame.line(
+        (center.0, center.1 - radius * 0.52),
+        (center.0, center.1 + radius * 0.12),
+        radius * 0.3,
+        color,
+    );
+    frame.filled_circle((center.0, center.1 + radius * 0.48), radius * 0.16, color);
 }
 
 fn glyph_for(icon: MenuIcon) -> MenuGlyph {
@@ -1215,25 +1406,28 @@ mod tests {
 
     #[test]
     fn start_widget_and_separator_draw_pixels() {
-        let mut pixmap = Pixmap::new(64, 64).expect("pixmap");
+        let mut frame = DockFrame::new(64, 64);
         let rect = Rect::new(8.0, 8.0, 48.0, 48.0);
         let mut renderer = Renderer::new();
-        renderer.draw_start_widget(&mut pixmap, rect, 1.0);
+        renderer.draw_start_widget(&mut frame, rect, 1.0);
+        let pixmap = renderer.render_frame(&frame).expect("pixmap");
         assert!(pixmap.pixels().iter().any(|pixel| pixel.blue() > 150));
 
-        let mut separator = Pixmap::new(64, 64).expect("pixmap");
+        let mut frame = DockFrame::new(64, 64);
         Renderer::draw_separator(
-            &mut separator,
+            &mut frame,
             rect,
             ThemeColor::rgba(255, 255, 255, 180),
             1.0,
             1.0,
         );
+        let separator = renderer.render_frame(&frame).expect("pixmap");
         assert!(separator.pixels().iter().any(|pixel| pixel.alpha() > 0));
 
-        let mut win10 = Pixmap::new(64, 64).expect("pixmap");
+        let mut frame = DockFrame::new(64, 64);
         renderer.set_start_style(StartMenuStyle::Windows10);
-        renderer.draw_start_widget(&mut win10, rect, 1.0);
+        renderer.draw_start_widget(&mut frame, rect, 1.0);
+        let win10 = renderer.render_frame(&frame).expect("pixmap");
         assert!(
             win10
                 .pixels()

@@ -1,6 +1,7 @@
 # Rust
 /target/
 /installer/gen/
+/uninstaller/gen/
 **/*.rs.bk
 
 # .NET / WinUI build locals

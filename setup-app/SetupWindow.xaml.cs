@@ -114,7 +114,7 @@ internal sealed partial class SetupWindow : Window
         var fileName = name switch
         {
             "GlideDock.Setup.Brand.Logo.png" => "Glide-Dock-Logo-Horizontal.png",
-            "GlideDock.Setup.Brand.Preview.png" => "Glide-Dock-Dock-Preview.png",
+            "GlideDock.Setup.Brand.Preview.png" => "Glide-Dock-Brand-Preview.png",
             _ => throw new ArgumentOutOfRangeException(nameof(name))
         };
         var path = Path.Combine(AppContext.BaseDirectory, "Assets", fileName);

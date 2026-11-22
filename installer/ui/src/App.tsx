@@ -3,16 +3,15 @@ import {
   Accordion, AccordionHeader, AccordionItem, AccordionPanel, Badge, Button, Caption1, Card, Checkbox, Dialog, DialogActions, DialogBody, DialogContent,
   DialogSurface, DialogTitle, Divider, Field, FluentProvider, Input, MessageBar, MessageBarBody,
   ProgressBar, Radio, RadioGroup, Select, Spinner, Subtitle2, Switch, Tab, TabList, Text,
-  Tooltip, webDarkTheme, webLightTheme,
+  webDarkTheme, webLightTheme,
 } from '@fluentui/react-components';
 import {
-  Apps20Regular, ArrowDownload20Regular, ArrowLeft16Regular, ArrowRight16Regular, Checkmark16Regular, Color20Regular,
+  Apps20Regular, ArrowLeft16Regular, ArrowRight16Regular, Checkmark16Regular, Color20Regular,
   CheckmarkCircle16Regular, CheckmarkCircle32Regular, ChevronRight16Regular, Delete20Regular,
-  Dismiss16Regular, ErrorCircle16Regular, FolderOpen20Regular, Info16Regular, Play20Regular, Power20Regular, ShieldCheckmark20Regular,
-  Search16Regular, Square16Regular, SquareMultiple16Regular, Subtract16Regular, Warning16Regular,
+  Dismiss24Regular, ErrorCircle16Regular, FolderOpen20Regular, Info16Regular, Play20Regular, Power20Regular, ShieldCheckmark20Regular,
+  Search16Regular, Warning16Regular,
 } from '@fluentui/react-icons';
-import brandMark from '../../../assets/brand/02-App-Icons/FullColor/Glide-Dock-FullColor-128x128.png';
-import { setupWindow } from './backend';
+import brandMark from '../../../assets/brand/01-Logo/Glide-Dock-Logo-Symbol.svg';
 import type { Page, Scope, StartupMode, Theme } from './backend';
 import { useInstaller } from './useInstaller';
 import type { FeedbackIntent, InstallerState } from './useInstaller';
@@ -26,20 +25,7 @@ function StatusIcon({ intent }: { intent: FeedbackIntent }) {
 }
 
 function Titlebar({ state }: { state: InstallerState }) {
-  const [maximized, setMaximized] = useState(false);
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    const sync = () => { void setupWindow.isMaximized().then(value => { if (!disposed) setMaximized(value); }).catch(console.error); };
-    sync();
-    setupWindow.onResized(sync).then(dispose => { if (disposed) dispose(); else unlisten = dispose; }).catch(console.error);
-    return () => { disposed = true; unlisten?.(); };
-  }, []);
-  async function toggleMaximize() {
-    try { await setupWindow.toggleMaximize(); setMaximized(await setupWindow.isMaximized()); }
-    catch (error) { console.error(error); }
-  }
-  const title = state.complete ? '操作已完成' : state.mode === 'manage' ? '管理' : state.mode === 'update' ? '更新' : state.mode === 'uninstall' ? '卸载' : '安装';
+  const title = state.complete ? '操作已完成' : state.mode === 'update' ? '更新' : state.mode === 'uninstall' ? '卸载' : '安装';
   return <header className="titlebar">
     <div className="brand-lockup" data-tauri-drag-region>
       <img className="brand-mark" src={brandMark} alt="" />
@@ -49,9 +35,10 @@ function Titlebar({ state }: { state: InstallerState }) {
     </div>
     <div className="titlebar-drag" data-tauri-drag-region />
     <div className="window-controls" aria-label="窗口控制">
-      <Tooltip content="最小化" relationship="label"><Button id="minimize-button" className="caption-button" appearance="subtle" size="small" icon={<Subtract16Regular />} aria-label="最小化" onClick={() => { void setupWindow.minimize().catch(console.error); }} /></Tooltip>
-      <Tooltip content={maximized ? '还原' : '最大化'} relationship="label"><Button id="maximize-button" className="caption-button" appearance="subtle" size="small" icon={maximized ? <SquareMultiple16Regular /> : <Square16Regular />} aria-label={maximized ? '还原' : '最大化'} onClick={() => { void toggleMaximize(); }} /></Tooltip>
-      <Tooltip content="关闭" relationship="label"><Button id="close-button" className="caption-button close-button" appearance="subtle" size="small" icon={<Dismiss16Regular />} aria-label="关闭" disabled={state.busy} onClick={() => { void state.close(); }} /></Tooltip>
+      <Button id="close-button" className="close-button" appearance="subtle" size="small"
+        aria-label="关闭" disabled={state.busy} onClick={() => { void state.close(); }}>
+        <Dismiss24Regular aria-hidden="true" />
+      </Button>
     </div>
   </header>;
 }
@@ -65,7 +52,7 @@ function Sidebar({ state }: { state: InstallerState }) {
   const active = steps.findIndex(step => step.page === state.page);
   const showSteps = state.mode === 'install' && !state.complete && !!state.info;
   return <aside className="sidebar">
-    <div className="sidebar-heading"><Caption1>GLIDE-DOCK</Caption1><Text weight="semibold">{showSteps ? '开始使用' : state.complete ? '一切就绪' : '应用管理'}</Text></div>
+    <div className="sidebar-heading"><Caption1>GLIDE-DOCK</Caption1><Text weight="semibold">{showSteps ? '开始使用' : state.complete ? '一切就绪' : state.mode === 'uninstall' ? '卸载应用' : '更新应用'}</Text></div>
     {showSteps ? <nav className="steps" id="install-steps" aria-label="安装步骤">
       <TabList vertical selectedValue={state.page} onTabSelect={(_, data) => state.navigate(data.value as Page)} size="large" appearance="subtle">
         {steps.map((step, index) => <Tab className="step-tab" id={'step-' + step.page} key={step.page} value={step.page}
@@ -76,8 +63,8 @@ function Sidebar({ state }: { state: InstallerState }) {
           <span className="step-copy"><span>{step.label}</span><Caption1>{step.description}</Caption1></span>
         </Tab>)}
       </TabList>
-    </nav> : <div className="sidebar-current"><span className="sidebar-current-icon">{state.complete ? <CheckmarkCircle32Regular /> : <Apps20Regular />}</span><Text>{state.complete ? '操作已完成' : '管理 Glide-Dock'}</Text><Caption1>{state.complete ? '现在可以关闭此窗口' : '更新或移除应用'}</Caption1></div>}
-    <div className="sidebar-note"><ShieldCheckmark20Regular /><span><Text size={200}>为 Windows 设计</Text><Caption1>Glide-Dock · v{state.info?.version ?? '0.4.2'}</Caption1></span></div>
+    </nav> : <div className="sidebar-current"><span className="sidebar-current-icon">{state.complete ? <CheckmarkCircle32Regular /> : <Apps20Regular />}</span><Text>{state.complete ? '操作已完成' : state.mode === 'uninstall' ? '卸载 Glide-Dock' : '更新 Glide-Dock'}</Text><Caption1>{state.complete ? '现在可以关闭此窗口' : state.mode === 'uninstall' ? '移除程序，默认保留设置' : '使用新版安装包更新'}</Caption1></div>}
+    <div className="sidebar-note"><ShieldCheckmark20Regular /><span><Text size={200}>为 Windows 设计</Text><Caption1>Glide-Dock · v{state.info?.version ?? '0.4.3'}</Caption1></span></div>
   </aside>;
 }
 
@@ -100,7 +87,7 @@ function Location({ state: s }: { state: InstallerState }) {
         validationMessage={s.destination.message + (s.destination.space ? ' · ' + s.destination.space : '')}>
         <div className="path-row">
           <Input id="install-path" value={s.installPath} onChange={(_, data) => s.changePath(data.value)} spellCheck={false} autoComplete="off" disabled={s.busy} aria-label="安装文件夹" />
-          <Button id="browse-button" icon={<FolderOpen20Regular />} disabled={s.busy} onClick={() => { void s.browse(); }}>浏览…</Button>
+          <Button id="browse-button" icon={<FolderOpen20Regular />} disabled={s.busy || s.browsing} aria-busy={s.browsing} onClick={() => { void s.browse(); }}>浏览…</Button>
         </div>
       </Field>
       <Checkbox id="desktop-shortcut" label="在桌面创建快捷方式" checked={s.desktopShortcut} disabled={s.busy} onChange={(_, data) => s.setDesktopShortcut(!!data.checked)} />
@@ -164,6 +151,7 @@ function Confirmation({ state: s }: { state: InstallerState }) {
   const updating = s.mode === 'update';
   const apps = s.info?.apps.filter((_, index) => s.selected.has(index)) ?? [];
   const details = [
+    ...(updating ? [['已安装版本', s.info?.existing?.version ?? '无法识别'], ['安装包版本', s.info?.version ?? '']] : []),
     ['安装到', s.installPath.trim()], ['安装范围', s.scope === 'all-users' ? '这台电脑的所有用户' : '当前账户'],
     ['颜色主题', updating ? '保留当前设置' : { system: '跟随系统', light: '浅色', dark: '深色' }[s.theme]],
     ['登录启动', updating ? '保留当前设置' : !s.startupEnabled ? '关闭' : s.startupMode === 'task' ? '计划任务' : '兼容方式'],
@@ -171,28 +159,23 @@ function Confirmation({ state: s }: { state: InstallerState }) {
     ['加入 Dock', updating ? '保留现有条目' : apps.length ? apps.length + ' 个：' + apps.slice(0, 3).map(app => app.name).join('、') + (apps.length > 3 ? '…' : '') : '暂不添加'],
   ];
   return <section className="page" id="confirm-page">
-    <Intro title={updating ? '准备更新' : '准备安装'}>{updating ? '更新程序文件，保留当前设置和 Dock 条目。' : '确认以下内容，准备好后即可开始安装。'}</Intro>
+    <Intro title={updating ? s.info?.update_eligibility?.title ?? '无法判断已安装版本' : '准备安装'}>{updating ? s.info?.update_eligibility?.message : '确认以下内容，准备好后即可开始安装。'}</Intro>
     <Card appearance="outline" className="summary-card"><dl className="install-summary">{details.map(([label, value]) => <div key={label}><dt>{label}</dt><dd id={label === '安装到' ? 'summary-path' : undefined}>{value}</dd></div>)}</dl></Card>
     <div className="preflight"><Subtitle2 as="h3">安装环境</Subtitle2><EnvironmentChecks state={s} /></div>
     {!s.info?.payload_ready && <MessageBar intent="error"><MessageBarBody>此构建未包含安装文件，请使用发布打包脚本生成的安装程序。</MessageBarBody></MessageBar>}
-    {!s.checking && !s.destination.valid && <MessageBar intent="error"><MessageBarBody>{s.destination.message}</MessageBarBody></MessageBar>}
+    {!s.checking && !s.destination.valid && s.destination.message && (!updating || s.info?.update_eligibility?.allowed) && <MessageBar intent="error"><MessageBarBody>{s.destination.message}</MessageBarBody></MessageBar>}
     {s.scope === 'all-users' && <Caption1 className="muted">此操作会请求 Windows 管理员确认。</Caption1>}
   </section>;
 }
 
-function Management({ state: s }: { state: InstallerState }) {
-  return <section className="page management-page" id="manage-view">
+function UninstallPage({ state: s }: { state: InstallerState }) {
+  return <section className="page management-page" id="uninstall-view">
     <div className="manage-brand"><img src={brandMark} alt="" /><Badge appearance="tint" color="brand">已安装</Badge></div>
-    <Intro title={s.mode === 'uninstall' ? '卸载 Glide-Dock' : 'Glide-Dock 已就绪'}>{s.info?.existing?.install_directory}</Intro>
-    <div className="manage-actions">
-      {s.mode !== 'uninstall' && <Button id="manage-update" className="manage-action" icon={<ArrowDownload20Regular />} disabled={s.busy} onClick={s.showUpdate}>
-        <span className="action-copy"><Text weight="semibold">安装更新</Text><Caption1 className="muted">保留当前设置和 Dock 条目</Caption1></span><ChevronRight16Regular />
-      </Button>}
-      <Button id="manage-uninstall" className="manage-action" icon={<Delete20Regular />} disabled={s.busy} onClick={() => s.setUninstallOpen(true)}>
-        <span className="action-copy"><Text weight="semibold">卸载 Glide-Dock</Text><Caption1 className="muted">默认保留个人设置和日志</Caption1></span><ChevronRight16Regular />
-      </Button>
-    </div>
-    <EnvironmentChecks state={s} />
+    <Intro title="卸载 Glide-Dock">{s.info?.existing?.install_directory}</Intro>
+    <Text className="muted">卸载会移除程序文件和快捷方式，默认保留当前账户的设置、Dock 条目和日志。</Text>
+    <div className="manage-actions"><Button id="uninstall-action" className="manage-action" icon={<Delete20Regular />} disabled={s.busy} onClick={() => s.setUninstallOpen(true)}>
+      <span className="action-copy"><Text weight="semibold">卸载 Glide-Dock</Text><Caption1 className="muted">默认保留个人设置和日志</Caption1></span><ChevronRight16Regular />
+    </Button></div>
   </section>;
 }
 
@@ -223,24 +206,24 @@ export default function App() {
   const loaded = !!state.info;
   useEffect(() => {
     content.current?.scrollTo({ top: 0 });
-    content.current?.querySelector<HTMLElement>('h2')?.focus({ preventScroll: true });
-  }, [state.page, state.mode, state.complete, loaded]);
+    if (!state.uninstallOpen) content.current?.querySelector<HTMLElement>('h2')?.focus({ preventScroll: true });
+  }, [state.page, state.mode, state.complete, state.uninstallOpen, loaded]);
   const showFeedbackDetails = !state.loadError && ['error', 'warning'].includes(state.feedback.intent);
   const footerMessage = showFeedbackDetails
     ? state.feedback.intent === 'error' ? '操作未完成，请查看详细信息后重试。' : '请查看详细提示。'
     : state.feedback.message;
   const completionTitle = state.mode === 'uninstall' ? '卸载已完成' : state.mode === 'update' ? '更新已完成' : '安装已完成';
-  return <FluentProvider theme={{ ...(dark ? webDarkTheme : webLightTheme), fontFamilyBase: '"Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif', fontFamilyNumeric: '"Segoe UI Variable", "Segoe UI", sans-serif' }} className="setup-provider">
+  return <FluentProvider theme={{ ...(dark ? webDarkTheme : webLightTheme), fontFamilyBase: '"Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif', fontFamilyNumeric: '"Segoe UI Variable", "Segoe UI", sans-serif' }} applyStylesToPortals={false} className="setup-provider" data-theme={dark ? 'dark' : 'light'}>
     <div className="setup-window">
       <Titlebar state={state} />
       <div className="setup-body">
         <Sidebar state={state} />
         <div className="workspace">
-      <main ref={content} className="content" id="main-content" aria-busy={state.busy}>
+      <main ref={content} className="content" id="main-content" tabIndex={0} aria-busy={state.busy}>
         {state.loadError ? <section className="page"><Intro title="暂时无法继续">安装信息未能加载。</Intro><MessageBar intent="error"><MessageBarBody>{state.loadError}</MessageBarBody></MessageBar><Button onClick={() => window.location.reload()}>重新检查</Button></section>
           : !state.info ? <div className="loading-state"><Spinner size="small" label="正在检查安装信息…" /></div>
           : state.complete ? <section className="page completion-page" id="completion-view"><CheckmarkCircle32Regular className="completion-icon" /><Intro title={completionTitle}>{state.mode === 'uninstall' ? 'Glide-Dock 程序文件已移除。' : 'Glide-Dock 已准备就绪。之后可以从桌面或开始菜单打开。'}</Intro></section>
-          : state.mode === 'manage' || state.mode === 'uninstall' ? <Management state={state} />
+          : state.mode === 'uninstall' ? <UninstallPage state={state} />
           : state.mode === 'update' || state.page === 'confirm' ? <Confirmation state={state} />
           : state.page === 'setup' ? <Preferences state={state} /> : <Location state={state} />}
         {showFeedbackDetails && <div className="feedback-details"><MessageBar intent={state.feedback.intent === 'error' ? 'error' : 'warning'}><MessageBarBody>{state.feedback.message}</MessageBarBody></MessageBar></div>}

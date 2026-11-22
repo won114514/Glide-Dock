@@ -1,4 +1,5 @@
 import { AboutSlint, Button, ComboBox, Palette, ScrollView, Slider, Switch } from "std-widgets.slint";
+import { WindowControls } from "window-controls.slint";
 
 // One palette is shared by the window, cards, text and standard controls.
 global SettingsStyle {
@@ -150,6 +151,7 @@ export component SettingsWindow inherits Window {
     in-out property <float> corner-radius: 20;
     in-out property <float> dock-opacity: 78;
     in-out property <bool> frosted-glass: true;
+    in-out property <bool> gpu-acceleration: true;
     in-out property <float> edge-margin: 10;
     in-out property <float> monitor-offset: 0;
     in-out property <bool> magnification: true;
@@ -201,9 +203,13 @@ export component SettingsWindow inherits Window {
                         Text { text: "Glide-Dock 设置"; color: SettingsStyle.text; font-size: 12px; vertical-alignment: center; }
                     }
                 }
-                Button { width: 46px; height: 44px; text: "—"; accessible-label: "最小化"; clicked => { root.action("window-minimize"); } }
-                Button { width: 46px; height: 44px; text: "□"; accessible-label: "最大化或还原"; clicked => { root.action("window-toggle-maximize"); } }
-                Button { width: 46px; height: 44px; text: "×"; accessible-label: "关闭设置"; clicked => { root.action("window-close"); } }
+                WindowControls {
+                    foreground: SettingsStyle.text;
+                    maximized: root.maximized;
+                    minimize => { root.action("window-minimize"); }
+                    toggle-maximize => { root.maximized = !root.maximized; }
+                    close => { root.action("window-close"); }
+                }
             }
         }
         Rectangle { height: 1px; background: SettingsStyle.line; }
@@ -218,7 +224,7 @@ export component SettingsWindow inherits Window {
                     spacing: root.short-window ? 6px : 8px;
                     HorizontalLayout {
                         spacing: 10px;
-                        Image { source: @image-url("../../assets/brand/02-App-Icons/FullColor/Glide-Dock-FullColor-128x128.png"); width: 28px; height: 28px; }
+                        Image { source: @image-url("../../assets/brand/01-Logo/Glide-Dock-Logo-Symbol.svg"); width: 28px; height: 28px; }
                         Text { text: "Glide-Dock"; color: SettingsStyle.text; font-size: root.compact ? 16px : 19px; font-weight: 700; vertical-alignment: center; }
                     }
                     BodyText { text: "设置中心"; height: root.short-window ? 20px : 28px; }
@@ -338,6 +344,17 @@ export component SettingsWindow inherits Window {
                                 Switch { checked <=> root.frosted-glass; toggled => { root.settings-changed(); } }
                             }
                             SliderCard { title: "背景透明度"; description: "数值越大，Dock 背景越不透明。"; minimum: 20; maximum: 100; value <=> root.dock-opacity; value-label: round(root.dock-opacity) + " %"; edited => { root.settings-changed(); } }
+                            gpu-card := SettingCard {
+                                title: "GPU 加速";
+                                description: "开启后优先使用显卡绘制 Dock，不可用时自动使用 CPU。切换立即生效。";
+                                control-width: 52px;
+                                stacked: false;
+                                Switch {
+                                    accessible-label: gpu-card.title;
+                                    checked <=> root.gpu-acceleration;
+                                    toggled => { root.settings-changed(); }
+                                }
+                            }
                             SectionLabel { text: "尺寸与间距"; }
                             SliderCard { title: "图标大小"; description: "设置 Dock 中图标的基础尺寸。"; minimum: 24; maximum: 128; value <=> root.icon-size; value-label: round(root.icon-size) + " DIP"; edited => { root.settings-changed(); } }
                             SliderCard { title: "图标间距"; description: "调整相邻图标之间的距离。"; minimum: 0; maximum: 48; value <=> root.spacing; value-label: round(root.spacing) + " DIP"; edited => { root.settings-changed(); } }
@@ -415,7 +432,7 @@ export component SettingsWindow inherits Window {
                         if root.page == 5: VerticalLayout {
                             spacing: 8px;
                             ContentCard {
-                                Image { source: @image-url("../../assets/brand/02-App-Icons/FullColor/Glide-Dock-FullColor-128x128.png"); width: 56px; height: 56px; }
+                                Image { source: @image-url("../../assets/brand/01-Logo/Glide-Dock-Logo-Symbol.svg"); width: 56px; height: 56px; }
                                 Text { text: "Glide-Dock"; color: SettingsStyle.text; font-size: 24px; font-weight: 700; }
                                 BodyText { text: "版本 " + root.app-version; }
                                 BodyText { text: "你拖进去什么，它就有什么。拖入应用、文件或文件夹，建立适合自己的桌面启动栏。"; }

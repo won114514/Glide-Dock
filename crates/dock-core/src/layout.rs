@@ -14,7 +14,7 @@ pub const EMPTY_CONTENT_WIDTH_DIP: f32 = 286.0;
 /// Device-pixel metrics derived from the DIP configuration and the current DPI.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Metrics {
-    /// DPI scale (`GetDpiForWindow / 96`).
+    /// Display scaling factor for converting DIPs to device pixels.
     pub scale: f32,
     /// Icon edge length in device pixels.
     pub icon: f32,
@@ -303,6 +303,48 @@ impl DockGeometry {
     }
 }
 
+// Project the desired centered row into the available interval. The two
+// directional passes bound each other without selecting a moving anchor.
+// If every icon already fits at its center, both passes leave it there.
+fn reflow_group(
+    icons: &mut [Rect],
+    centers: &[f32],
+    base: f32,
+    left: f32,
+    right: f32,
+    bottom: f32,
+) {
+    if icons.is_empty() {
+        return;
+    }
+    let base_width = base * icons.len() as f32;
+    let extra: f32 = icons.iter().map(|icon| icon.width - base).sum();
+    let fraction = if extra > 0.0 {
+        ((right - left - base_width) / extra).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let mut cursor = left;
+    let mut latest = right - base_width - extra * fraction;
+    for (icon, center) in icons.iter_mut().zip(centers) {
+        let width = base + (icon.width - base) * fraction;
+        let desired = center - width / 2.0;
+        let x = desired.max(cursor).min(latest);
+        *icon = Rect::new(x, bottom - width, width, width);
+        cursor = x + width;
+        latest += width;
+    }
+    cursor = right;
+    let mut earliest = left + base_width + extra * fraction;
+    for (icon, center) in icons.iter_mut().zip(centers).rev() {
+        let desired = center - icon.width / 2.0;
+        earliest -= icon.width;
+        let x = desired.min(cursor - icon.width).max(earliest);
+        cursor = x;
+        icon.x = (icon.x + x) / 2.0;
+    }
+}
+
 /// One rendered frame: icon rectangles, animated background and insertion point.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrameLayout {
@@ -318,7 +360,7 @@ impl FrameLayout {
     /// Computes the layout for the given spring values.
     #[must_use]
     pub fn compute(geometry: &DockGeometry, metrics: &Metrics, scales: &[f32]) -> Self {
-        let count = scales.len();
+        let count = scales.len().min(geometry.item_count);
         if count == 0 {
             return Self {
                 icons: Vec::new(),
@@ -328,96 +370,50 @@ impl FrameLayout {
         }
 
         let centers = geometry.slot_centers();
-        let count = count.min(centers.len());
-        let widths: Vec<f32> = scales
-            .iter()
-            .take(count)
-            .enumerate()
-            .map(|(index, scale)| {
-                let base = geometry
-                    .slot_widths
-                    .get(index)
-                    .copied()
-                    .unwrap_or(metrics.icon);
-                (base * scale.clamp(1.0, MAX_HOVER_SCALE)).max(1.0)
+        let bottom = geometry.dock_base.bottom() - metrics.padding;
+        let mut icons: Vec<Rect> = (0..count)
+            .map(|index| {
+                let base = geometry.slot_widths[index];
+                let height = if base < geometry.icon {
+                    metrics.icon
+                } else {
+                    base * scales[index].clamp(1.0, MAX_HOVER_SCALE)
+                };
+                let width = if base < geometry.icon { base } else { height };
+                Rect::new(centers[index] - width / 2.0, bottom - height, width, height)
             })
             .collect();
 
-        // At the Apple default (1.35× with an 18 DIP gap) every icon still fits
-        // in its fixed slot. Keep the base centres fixed in that case; only
-        // larger user-configured peaks need the overlap-avoiding reflow.
-        let fixed_layout = metrics.max_factor <= 1.0 + geometry.gap / metrics.icon + 1e-3;
-        let mut lefts = vec![0.0f32; count];
-        if fixed_layout {
-            for (index, (center, width)) in centers.iter().zip(&widths).enumerate() {
-                lefts[index] = center - width / 2.0;
+        // Separators are immovable boundaries. The outside groups can use the
+        // window's slack, while each inside group uses the gaps at its edges.
+        let mut start = 0;
+        let mut left = metrics.shadow * 0.5;
+        for end in 0..=count {
+            if end < count && geometry.slot_widths[end] >= geometry.icon {
+                continue;
             }
-        } else {
-            // The icon under the cursor (largest scale) is the anchor: its
-            // baseline center does not move, all others are pushed away.
-            let anchor = scales
-                .iter()
-                .take(count)
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(index, _)| index)
-                .unwrap_or(0);
-            lefts[anchor] = centers[anchor] - widths[anchor] / 2.0;
-            for index in (anchor + 1)..count {
-                let gap = geometry
-                    .gaps
-                    .get(index - 1)
-                    .copied()
-                    .unwrap_or(geometry.gap);
-                lefts[index] = lefts[index - 1] + widths[index - 1] + gap;
-            }
-            for index in (0..anchor).rev() {
-                let gap = geometry.gaps.get(index).copied().unwrap_or(geometry.gap);
-                lefts[index] = lefts[index + 1] - gap - widths[index];
+            let right = icons
+                .get(end)
+                .map_or(geometry.window.width - metrics.shadow * 0.5, |icon| {
+                    icon.left()
+                });
+            reflow_group(
+                &mut icons[start..end],
+                &centers[start..end],
+                geometry.icon,
+                left,
+                right,
+                bottom,
+            );
+            if end < count {
+                left = icons[end].right();
+                start = end + 1;
             }
         }
-
-        // Keep the magnified row inside the layered window.
-        let content_left = lefts[0];
-        let content_right = lefts[count - 1] + widths[count - 1];
-        let min_x = metrics.shadow * 0.5;
-        let max_x = geometry.window.width - metrics.shadow * 0.5;
-        let shift = if content_right - content_left >= max_x - min_x {
-            (min_x + max_x - content_right - content_left) / 2.0
-        } else if content_left < min_x {
-            min_x - content_left
-        } else if content_right > max_x {
-            max_x - content_right
-        } else {
-            0.0
-        };
-
-        let bottom = geometry.dock_base.bottom() - metrics.padding;
-        let centers = geometry.slot_centers();
-        let icons: Vec<Rect> = (0..count)
-            .map(|index| {
-                let width = widths[index];
-                let separator = geometry
-                    .slot_widths
-                    .get(index)
-                    .is_some_and(|slot| (*slot - metrics.separator_width).abs() < 0.01);
-                let height = if separator { metrics.icon } else { width };
-                let x = if separator {
-                    centers[index] - width / 2.0
-                } else {
-                    lefts[index] + shift
-                };
-                Rect::new(x, bottom - height, width, height)
-            })
-            .collect();
-
-        let max_scale = scales
+        let extra_top = icons
             .iter()
-            .take(count)
-            .copied()
-            .fold(1.0f32, f32::max)
-            .clamp(1.0, MAX_HOVER_SCALE);
-        let extra_top = (max_scale - 1.0) * metrics.icon;
+            .map(|icon| icon.height - metrics.icon)
+            .fold(0.0, f32::max);
 
         let icon_left = icons
             .iter()
@@ -681,6 +677,56 @@ mod tests {
         let frame = FrameLayout::compute(&geometry, &m, &[2.6, 1.0, 2.6]);
         assert!((frame.icons[1].center().x - geometry.slot_centers()[1]).abs() < 0.01);
         assert!((frame.icons[1].width - m.separator_width).abs() < 0.01);
+    }
+
+    #[test]
+    fn two_x_reflow_is_continuous_across_a_slot_midpoint() {
+        let config = MotionConfig {
+            max_scale: 2.0,
+            ..MotionConfig::default()
+        };
+        let behavior = Behavior::default();
+        let m = Metrics::new(&Appearance::default(), &behavior, &config, 1.0);
+        let geometry = DockGeometry::new(10, &m);
+        let centers = geometry.slot_centers();
+        let x = (centers[4] + centers[5]) / 2.0;
+        let frame_at = |x| {
+            let cursor = Point::new(x, geometry.content_base.center().y);
+            let scales = target_scales(10, Some(cursor), &geometry, &m, &behavior);
+            FrameLayout::compute(&geometry, &m, &scales)
+        };
+        for (a, b) in frame_at(x - 0.01)
+            .icons
+            .iter()
+            .zip(frame_at(x + 0.01).icons)
+        {
+            assert!((a.center().x - b.center().x).abs() < 0.1);
+        }
+    }
+
+    #[test]
+    fn group_spends_gaps_before_shrinking_all_increments_proportionally() {
+        let m = metrics();
+        let items = [
+            DockItem::separator(1),
+            DockItem::application(2, "A", "a.exe"),
+            DockItem::application(3, "B", "b.exe"),
+            DockItem::separator(4),
+        ];
+        let g = DockGeometry::with_items(&items, &m);
+        let gap_used = FrameLayout::compute(&g, &m, &[1.0, 1.5, 1.5, 1.0]);
+        assert!((gap_used.icons[1].width - m.icon * 1.5).abs() < 0.01);
+        let squeezed = FrameLayout::compute(&g, &m, &[2.0, 2.0, 1.5, 2.0]);
+        let icons = squeezed.icons;
+        assert!(icons[1].width < m.icon * 2.0);
+        assert!(((icons[1].width - m.icon) / (icons[2].width - m.icon) - 2.0).abs() < 0.01);
+        assert!(
+            icons
+                .windows(2)
+                .all(|pair| pair[0].right() <= pair[1].left() + 0.01)
+        );
+        assert_eq!(icons[0], g.slot_rects()[0]);
+        assert_eq!(icons[3], g.slot_rects()[3]);
     }
 
     #[test]

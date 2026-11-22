@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="glide-mark-title glide-mark-description">
+  <title id="glide-mark-title">Glide-Dock</title>
+  <desc id="glide-mark-description">An open geometric G with a forward-cut crossbar, a slight forward lean, and a teal-to-blue gradient on a transparent background.</desc>
+  <defs>
+    <linearGradient id="glide-gradient" x1="22" y1="18" x2="108" y2="111" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#13B6B3"/>
+      <stop offset="0.48" stop-color="#2A88F4"/>
+      <stop offset="1" stop-color="#5860E8"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#glide-gradient)" transform="translate(6.7264 0) skewX(-6)" d="m108 35-15 13C86 38 78 34 65 34h-5c-17 0-26 10-26 27v6c0 17 9 27 26 27h8c14 0 23-7 26-19H59l11-19h44v11c0 29-18 47-47 47h-6c-29 0-47-18-47-47v-6c0-29 18-47 47-47h4c21 0 35 8 43 21Z"/>
+</svg>

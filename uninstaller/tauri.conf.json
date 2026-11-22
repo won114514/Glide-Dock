@@ -1,0 +1,40 @@
+{
+  "productName": "Glide-Dock 卸载程序",
+  "identifier": "app.glidedock.uninstall",
+  "build": {
+    "frontendDist": "../target/installer-ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "setup",
+        "title": "Glide-Dock 卸载程序",
+        "width": 840,
+        "height": 620,
+        "center": true,
+        "decorations": false,
+        "shadow": true,
+        "dragDropEnabled": false,
+        "devtools": false,
+        "create": false,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; form-action 'none'",
+      "capabilities": [
+        "setup"
+      ]
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": [
+      "../assets/brand/03-Windows-ICO/Glide-Dock-FullColor.ico"
+    ],
+    "publisher": "Glide-Dock"
+  }
+}

@@ -28,6 +28,8 @@ export function useInstaller() {
   const [deletePersonalData, setDeletePersonalData] = useState(false);
   const [feedback, setFeedback] = useState<{ message: string; intent: FeedbackIntent }>({ message: '正在读取安装信息…', intent: 'info' });
   const [pending, setPending] = useState(false);
+  const [browsing, setBrowsing] = useState(false);
+  const browsingRef = useRef(false);
   const [token, setToken] = useState<string | null>(null);
   const [progress, setProgress] = useState<number | null>(null);
   const [phase, setPhase] = useState<'idle' | 'running' | 'complete' | 'failed'>('idle');
@@ -36,7 +38,7 @@ export function useInstaller() {
   const lastProgress = useRef(0);
   const busy = pending || token !== null;
   const complete = phase === 'complete';
-  const canInstall = !!info?.payload_ready && info.checks.every(check => check.passed);
+  const canInstall = !!info?.payload_ready && info.checks.every(check => check.passed) && (mode !== 'update' || !!info.update_eligibility?.allowed);
 
   useEffect(() => {
     let disposed = false;
@@ -44,15 +46,16 @@ export function useInstaller() {
       if (disposed) return;
       setInfo(result);
       setMode(result.mode);
+      document.title = result.mode === 'uninstall' ? 'Glide-Dock 卸载程序' : 'Glide-Dock 安装程序';
+      if (result.mode === 'uninstall') setChecking(false);
       setScope(result.existing?.scope ?? 'current-user');
       setInstallPath(result.install_directory);
       setPage(result.mode === 'update' ? 'confirm' : 'location');
       setUninstallOpen(result.mode === 'uninstall');
       setFeedback({
-        message: result.mode === 'manage' ? '已找到现有安装。'
-          : result.mode === 'uninstall' ? '默认保留当前账户的设置、Dock 条目和日志。'
-          : result.mode === 'update' ? '更新会保留当前设置和 Dock 条目。' : '请选择安装位置。',
-        intent: result.mode === 'uninstall' ? 'warning' : 'info',
+        message: result.mode === 'uninstall' ? '默认保留当前账户的设置、Dock 条目和日志。'
+          : result.mode === 'update' ? result.update_eligibility?.message ?? '无法读取版本信息。' : '请选择安装位置。',
+        intent: result.mode === 'uninstall' || (result.mode === 'update' && !result.update_eligibility?.allowed) ? 'warning' : 'info',
       });
     }).catch(error => {
       if (disposed) return;
@@ -73,6 +76,7 @@ export function useInstaller() {
 
   useEffect(() => {
     if (!info || !['install', 'update'].includes(mode) || busy || complete) return;
+    if (mode === 'update' && !info.update_eligibility?.allowed) { setChecking(false); return; }
     let cancelled = false;
     setChecking(true);
     setDestination({ valid: false, message: '正在检查安装位置…', space: '' });
@@ -100,7 +104,7 @@ export function useInstaller() {
         const percent = status.phase === 'complete' ? 100 : Math.min(99, Math.max(lastProgress.current, status.percent));
         lastProgress.current = percent;
         setProgress(percent);
-        setFeedback({ message: status.message, intent: status.phase === 'failed' ? 'error' : status.phase === 'complete' ? 'success' : 'info' });
+        setFeedback({ message: status.message, intent: status.phase === 'failed' ? 'error' : status.warnings?.length ? 'warning' : status.phase === 'complete' ? 'success' : 'info' });
         if (status.phase === 'running') {
           timer = window.setTimeout(poll, 350);
           return;
@@ -138,11 +142,18 @@ export function useInstaller() {
   }
 
   async function browse() {
+    if (busyRef.current || browsingRef.current) return;
+    browsingRef.current = true;
+    setBrowsing(true);
     const request = ++scopeRequest.current;
     try {
       const path = await invoke<string | null>('browse_destination');
       if (path && request === scopeRequest.current) setInstallPath(path);
     } catch (error) { setFeedback({ message: errorText(error), intent: 'error' }); }
+    finally {
+      browsingRef.current = false;
+      setBrowsing(false);
+    }
   }
 
   function enterPage(next: Page) {
@@ -164,13 +175,6 @@ export function useInstaller() {
       setFurthestPage(Math.max(furthestPage, index + 1));
       enterPage(pageOrder[index + 1]);
     }
-  }
-
-  function showUpdate() {
-    if (busyRef.current) return;
-    setMode('update');
-    setPage('confirm');
-    setFeedback({ message: '更新会保留当前设置和 Dock 条目。', intent: 'info' });
   }
 
   function toggleApp(index: number, checked: boolean) {
@@ -229,8 +233,7 @@ export function useInstaller() {
   else if (complete) { primaryLabel = '关闭'; primaryDisabled = false; primaryAction = () => { void close(); }; }
   else if (busy) primaryLabel = mode === 'uninstall' ? '正在卸载…' : mode === 'update' ? '正在更新…' : '正在安装…';
   else if (info) {
-    if (mode === 'manage') { primaryLabel = '选择一个操作'; primaryDisabled = true; }
-    else if (mode === 'uninstall') { primaryLabel = phase === 'failed' ? '重试卸载' : '确认卸载…'; primaryAction = () => setUninstallOpen(true); }
+    if (mode === 'uninstall') { primaryLabel = phase === 'failed' ? '重试卸载' : '确认卸载…'; primaryAction = () => setUninstallOpen(true); }
     else if (mode === 'update' || page === 'confirm') {
       primaryLabel = mode === 'update' ? (phase === 'failed' ? '重试更新' : '安装更新') : (phase === 'failed' ? '重试安装' : '开始安装');
       primaryDisabled = !destination.valid || checking || !canInstall;
@@ -241,8 +244,8 @@ export function useInstaller() {
   return {
     info, loadError, mode, page, furthestPage, scope, installPath, destination, checking, theme, startupEnabled,
     startupMode, desktopShortcut, launchAfterInstall, selected, query, uninstallOpen, deletePersonalData,
-    feedback, busy, complete, canInstall, progress, phase, visibleApps, appsOpen, setAppsOpen, primaryLabel, primaryDisabled, primaryAction,
-    changeScope, changePath, browse, navigate, nextPage, showUpdate, toggleApp, selectVisible, close, beginUninstall,
+    feedback, busy, browsing, complete, canInstall, progress, phase, visibleApps, appsOpen, setAppsOpen, primaryLabel, primaryDisabled: primaryDisabled || browsing, primaryAction,
+    changeScope, changePath, browse, navigate, nextPage, toggleApp, selectVisible, close, beginUninstall,
     setTheme, setStartupEnabled, setStartupMode, setDesktopShortcut, setLaunchAfterInstall, setQuery,
     setSelected, setUninstallOpen, setDeletePersonalData,
   };

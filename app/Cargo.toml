@@ -15,7 +15,16 @@ dock-core.workspace = true
 dock-render.workspace = true
 dock-storage.workspace = true
 dock-platform-windows.workspace = true
-windows.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }
+windows-numerics.workspace = true
 tiny-skia.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

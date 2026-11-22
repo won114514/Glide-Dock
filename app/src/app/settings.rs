@@ -452,6 +452,7 @@ fn populate_values(window: &SettingsWindow, values: &SettingsValues) {
     window.set_corner_radius(appearance.corner_radius);
     window.set_dock_opacity(appearance.opacity * 100.0);
     window.set_frosted_glass(appearance.frosted_glass);
+    window.set_gpu_acceleration(appearance.gpu_acceleration);
     window.set_edge_margin(appearance.edge_margin);
     window.set_monitor_offset(values.monitor.offset);
     window.set_magnification(behavior.magnification);
@@ -493,6 +494,7 @@ fn values_from_window(window: &SettingsWindow, previous: &SettingsValues) -> Set
     values.appearance.corner_radius = window.get_corner_radius();
     values.appearance.opacity = window.get_dock_opacity() / 100.0;
     values.appearance.frosted_glass = window.get_frosted_glass();
+    values.appearance.gpu_acceleration = window.get_gpu_acceleration();
     values.appearance.edge_margin = window.get_edge_margin();
     values.behavior.magnification = window.get_magnification();
     values.behavior.launch_animation = window.get_launch_animation();
@@ -827,7 +829,7 @@ impl DockApp {
             &self.config.appearance,
             &self.config.behavior,
             &self.config.motion,
-            self.dpi_scale,
+            self.monitor.dpi_scale,
         );
         if self.config.appearance.frosted_glass != previous_glass {
             self.refresh_glass_state();
@@ -838,7 +840,6 @@ impl DockApp {
             self.relayout_window(self.window_visible);
         }
         self.animate();
-        self.render();
         self.mark_dirty();
     }
 

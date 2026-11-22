@@ -1,4 +1,4 @@
-param([string]$OutputDirectory)
+param([string]$OutputDirectory, [switch]$SkipRestore)
 # Builds the standalone Rust + Tauri Glide-Dock installer.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -76,7 +76,7 @@ function Remove-SafeFile([string]$Path,[string]$AllowedRoot) {
     Remove-Item -LiteralPath $full -Force
 }
 New-Item -ItemType Directory -Force -Path $output | Out-Null
-& (Join-Path $PSScriptRoot 'build-installer-ui.ps1')
+& (Join-Path $PSScriptRoot 'build-installer-ui.ps1') -SkipRestore:$SkipRestore
 if ($buildPayload) {
     & (Join-Path $PSScriptRoot 'package.ps1')
     if ($LASTEXITCODE -ne 0) { throw "Package build failed with exit code $LASTEXITCODE" }
@@ -92,11 +92,21 @@ $previousPayloadEnvironment = $env:GLIDE_DOCK_PAYLOAD_ZIP
 if (-not $hadPayloadEnvironment -or -not $samePayloadPath) {
     $env:GLIDE_DOCK_PAYLOAD_ZIP = $payloadDestination
 }
+$hadUninstallerEnvironment = Test-Path Env:GLIDE_DOCK_UNINSTALL_EXE
+$previousUninstallerEnvironment = $env:GLIDE_DOCK_UNINSTALL_EXE
 try {
+    Write-Host "Building Glide-Dock uninstaller $version..."
+    cargo build --locked --release -p glide-uninstall | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Uninstaller build failed with exit code $LASTEXITCODE" }
+    $uninstaller = Join-Path $root 'target\release\glide-uninstall.exe'
+    if (-not (Test-Path -LiteralPath $uninstaller)) { throw "Uninstaller output is missing: $uninstaller" }
+    $env:GLIDE_DOCK_UNINSTALL_EXE = [IO.Path]::GetFullPath($uninstaller)
     Write-Host "Building Tauri installer $version..."
     cargo build --locked --release -p glide-setup | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "Tauri installer build failed with exit code $LASTEXITCODE" }
 } finally {
+    if ($hadUninstallerEnvironment) { $env:GLIDE_DOCK_UNINSTALL_EXE = $previousUninstallerEnvironment }
+    else { Remove-Item Env:GLIDE_DOCK_UNINSTALL_EXE -ErrorAction SilentlyContinue }
     if ($hadPayloadEnvironment) { $env:GLIDE_DOCK_PAYLOAD_ZIP = $previousPayloadEnvironment }
     else { Remove-Item Env:GLIDE_DOCK_PAYLOAD_ZIP -ErrorAction SilentlyContinue }
 }

@@ -36,6 +36,42 @@ impl StartupMode {
     }
 }
 
+/// A fixed operation on the Glide-Dock logon task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LogonTaskAction {
+    /// Creates the task with the usual Glide-Dock startup arguments.
+    Create {
+        /// Absolute path to the installed Glide-Dock executable.
+        executable: PathBuf,
+    },
+    /// Removes only the Glide-Dock logon task.
+    Delete {},
+}
+
+/// Applies an operation using the current process's permissions, without UAC.
+pub fn apply_logon_task(action: LogonTaskAction) -> io::Result<()> {
+    match action {
+        LogonTaskAction::Create { executable } => create_task(&executable.canonicalize()?, false),
+        LogonTaskAction::Delete {} => delete_task(false),
+    }
+}
+
+fn elevate_logon_task(action: LogonTaskAction) -> io::Result<()> {
+    match action {
+        LogonTaskAction::Create { executable } => create_task(&executable, true),
+        LogonTaskAction::Delete {} => delete_task(true),
+    }
+}
+
+fn run_logon_task(
+    action: LogonTaskAction,
+    apply: &impl Fn(LogonTaskAction) -> io::Result<()>,
+    elevate: &impl Fn(LogonTaskAction) -> io::Result<()>,
+) -> io::Result<()> {
+    apply(action.clone()).or_else(|_| elevate(action))
+}
+
 /// The configured startup mechanism and current registration state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartupState {
@@ -77,9 +113,26 @@ pub fn enable(
     executable: &Path,
     config_directory: &Path,
 ) -> io::Result<Option<String>> {
+    enable_with_elevation(mode, executable, config_directory, &elevate_logon_task)
+}
+
+/// Enables startup, using the supplied application-owned entry point when UAC is needed.
+/// Canceled consent still falls back to the current-user Run registration.
+pub fn enable_with_elevation(
+    mode: StartupMode,
+    executable: &Path,
+    config_directory: &Path,
+    elevate: &impl Fn(LogonTaskAction) -> io::Result<()>,
+) -> io::Result<Option<String>> {
     let executable = executable.canonicalize()?;
     match mode {
-        StartupMode::Task => match create_task(&executable, false) {
+        StartupMode::Task => match run_logon_task(
+            LogonTaskAction::Create {
+                executable: executable.clone(),
+            },
+            &apply_logon_task,
+            elevate,
+        ) {
             Ok(()) => {
                 let warning = disable_run()
                     .err()
@@ -87,35 +140,24 @@ pub fn enable(
                 write_preference(config_directory, StartupMode::Task)?;
                 Ok(warning)
             }
-            Err(error) => match create_task(&executable, true) {
-                Ok(()) => {
-                    let warning = disable_run()
-                        .err()
-                        .map(|error| format!("登录任务已启用，但旧版启动项未能移除：{error}"));
-                    write_preference(config_directory, StartupMode::Task)?;
-                    Ok(warning)
-                }
-                Err(elevated) if elevated.raw_os_error() == Some(1223) => {
-                    enable_run(&executable)?;
-                    write_preference(config_directory, StartupMode::Run)?;
-                    Ok(Some(
-                        "未授予计划任务权限，已改用无需管理员权限的兼容启动方式。".into(),
-                    ))
-                }
-                Err(elevated) => {
-                    let _ = error;
-                    enable_run(&executable)?;
-                    write_preference(config_directory, StartupMode::Run)?;
-                    Ok(Some(format!(
-                        "计划任务无法创建，已改用兼容启动方式：{elevated}"
-                    )))
-                }
-            },
+            Err(error) if error.raw_os_error() == Some(1223) => {
+                enable_run(&executable)?;
+                write_preference(config_directory, StartupMode::Run)?;
+                Ok(Some(
+                    "未授予计划任务权限，已改用无需管理员权限的兼容启动方式。".into(),
+                ))
+            }
+            Err(error) => {
+                enable_run(&executable)?;
+                write_preference(config_directory, StartupMode::Run)?;
+                Ok(Some(format!(
+                    "计划任务无法创建，已改用兼容启动方式：{error}"
+                )))
+            }
         },
         StartupMode::Run => {
             enable_run(&executable)?;
-            let warning = delete_task(false)
-                .or_else(|_| delete_task(true))
+            let warning = run_logon_task(LogonTaskAction::Delete {}, &apply_logon_task, elevate)
                 .err()
                 .map(|error| format!("兼容启动已启用，但计划任务未能移除：{error}"));
             write_preference(config_directory, StartupMode::Run)?;
@@ -126,10 +168,11 @@ pub fn enable(
 
 /// Removes this user's recognized Task Scheduler and Run registrations.
 pub fn disable() -> io::Result<()> {
-    match delete_task(false) {
-        Ok(()) => (),
-        Err(_) => delete_task(true)?,
-    }
+    disable_with_elevation(&elevate_logon_task)
+}
+
+fn disable_with_elevation(elevate: &impl Fn(LogonTaskAction) -> io::Result<()>) -> io::Result<()> {
+    run_logon_task(LogonTaskAction::Delete {}, &apply_logon_task, elevate)?;
     disable_run()
 }
 
@@ -140,12 +183,21 @@ pub fn set_preferred_mode(mode: StartupMode, config_directory: &Path) -> io::Res
 
 /// Removes a startup registration only when it points into `install_directory`.
 pub fn remove_for_install(install_directory: &Path, config_directory: &Path) -> io::Result<()> {
+    remove_for_install_with_elevation(install_directory, config_directory, &elevate_logon_task)
+}
+
+/// Removes registrations for this installation, using the supplied UAC entry point.
+pub fn remove_for_install_with_elevation(
+    install_directory: &Path,
+    config_directory: &Path,
+    elevate: &impl Fn(LogonTaskAction) -> io::Result<()>,
+) -> io::Result<()> {
     let state = query(config_directory)?;
     if state
         .executable
         .is_some_and(|path| path.starts_with(install_directory))
     {
-        disable()?;
+        disable_with_elevation(elevate)?;
     }
     Ok(())
 }
@@ -361,6 +413,44 @@ fn windows_quote(argument: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn successful_task_operation_does_not_request_elevation() {
+        run_logon_task(LogonTaskAction::Delete {}, &|_| Ok(()), &|_| {
+            panic!("successful operation must not ask for UAC")
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn failed_task_operation_uses_supplied_product_entry_point() {
+        let expected = LogonTaskAction::Create {
+            executable: PathBuf::from("installed-glide-dock.exe"),
+        };
+        let invoked = std::cell::Cell::new(false);
+        run_logon_task(
+            expected.clone(),
+            &|_| Err(io::Error::from_raw_os_error(5)),
+            &|action| {
+                assert_eq!(action, expected);
+                invoked.set(true);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(invoked.get());
+    }
+
+    #[test]
+    fn task_consent_cancellation_reaches_the_run_fallback_unchanged() {
+        let error = run_logon_task(
+            LogonTaskAction::Delete {},
+            &|_| Err(io::Error::from_raw_os_error(5)),
+            &|_| Err(io::Error::from_raw_os_error(1223)),
+        )
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(1223));
+    }
 
     #[test]
     fn quotes_task_paths_and_trailing_slashes_for_windows() {

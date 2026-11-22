@@ -3,9 +3,11 @@
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{DWM_TIMING_INFO, DwmGetCompositionTimingInfo};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromWindow,
+    DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW, HMONITOR,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromPoint, MonitorFromWindow,
 };
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
+use windows::core::PCWSTR;
 
 /// A monitor work area in physical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +43,7 @@ pub struct MonitorMetrics {
     pub work: WorkArea,
     /// DPI scale, e.g. `1.25` for 125%.
     pub dpi_scale: f32,
-    /// Best-effort compositor refresh rate in hertz.
+    /// Best-effort monitor refresh rate in hertz.
     pub refresh_hz: u32,
 }
 
@@ -69,33 +71,57 @@ pub fn metrics_for_window(hwnd: HWND) -> MonitorMetrics {
             bottom: info.rcWork.bottom,
         };
     }
-    let dpi = unsafe { GetDpiForWindow(hwnd) };
+    // A desktop-band window may keep its old window DPI after the monitor
+    // scale changes. The custom layout runs in physical pixels, so read the
+    // scale from the monitor itself and fall back to the window if needed.
+    let mut dpi_x = 0;
+    let mut dpi_y = 0;
+    let measured = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
+    let dpi = if measured.is_ok() && dpi_x != 0 {
+        dpi_x
+    } else {
+        unsafe { GetDpiForWindow(hwnd) }
+    };
     let dpi_scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
     MonitorMetrics {
         work,
         dpi_scale,
-        refresh_hz: refresh_hz(hwnd),
+        refresh_hz: monitor_refresh_hz(monitor).unwrap_or_else(composition_refresh_hz),
     }
 }
 
-/// Returns the best available compositor refresh rate.
-///
-/// `DwmGetCompositionTimingInfo` reports the rate the compositor is actually
-/// presenting at, which is what the layered window follows. If DWM cannot
-/// answer (composition disabled, remote session) we fall back to 60 Hz; the
-/// animation timelines are time-based, so this only affects sampling density.
-#[must_use]
-pub fn refresh_hz(hwnd: HWND) -> u32 {
+fn monitor_refresh_hz(monitor: HMONITOR) -> Option<u32> {
+    let mut info = MONITORINFOEXW::default();
+    info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+    if !unsafe { GetMonitorInfoW(monitor, &mut info.monitorInfo) }.as_bool() {
+        return None;
+    }
+    let mut mode = DEVMODEW {
+        dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+        ..Default::default()
+    };
+    let ok = unsafe {
+        EnumDisplaySettingsW(
+            PCWSTR(info.szDevice.as_ptr()),
+            ENUM_CURRENT_SETTINGS,
+            &mut mode,
+        )
+    };
+    // A frequency of zero or one represents the hardware default.
+    (ok.as_bool() && mode.dmDisplayFrequency > 1).then_some(mode.dmDisplayFrequency)
+}
+
+fn composition_refresh_hz() -> u32 {
     let mut timing = DWM_TIMING_INFO {
         cbSize: std::mem::size_of::<DWM_TIMING_INFO>() as u32,
         ..DWM_TIMING_INFO::default()
     };
-    let ok = unsafe { DwmGetCompositionTimingInfo(hwnd, &mut timing) }.is_ok();
+    let ok = unsafe { DwmGetCompositionTimingInfo(HWND::default(), &mut timing) }.is_ok();
     if ok && timing.rateCompose.uiDenominator != 0 {
         let hz =
             f64::from(timing.rateCompose.uiNumerator) / f64::from(timing.rateCompose.uiDenominator);
         if hz.is_finite() && hz >= 20.0 {
-            return (hz.round() as u32).clamp(30, 360);
+            return hz.round() as u32;
         }
     }
     60

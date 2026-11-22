@@ -1,0 +1,18 @@
+{
+  "identifier": "setup",
+  "description": "Allow only local Glide-Dock uninstall operations.",
+  "windows": [
+    "setup"
+  ],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-destroy",
+    "core:window:allow-start-dragging",
+    "core:window:allow-close",
+    "allow-setup-info",
+    "allow-start-uninstall",
+    "allow-operation-status",
+    "allow-finish-operation"
+  ]
+}

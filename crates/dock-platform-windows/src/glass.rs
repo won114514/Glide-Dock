@@ -16,7 +16,10 @@ use windows::UI::Composition::{
 };
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmFlush, DwmSetWindowAttribute};
-use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, CreateRectRgn, CreateRoundRectRgn, DeleteObject, EndPaint, HGDIOBJ, PAINTSTRUCT,
+    SetWindowRgn,
+};
 use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
 use windows::Win32::System::WinRT::{RO_INIT_SINGLETHREADED, RoInitialize};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -80,6 +83,7 @@ pub struct GlassBackdrop {
     _root: ContainerVisual,
     geometry: CompositionRoundedRectangleGeometry,
     tint: CompositionColorBrush,
+    input_bounds: (u32, u32, u32),
     _backdrop: SpriteVisual,
     _tint_visual: SpriteVisual,
     _compositor: Compositor,
@@ -88,8 +92,7 @@ pub struct GlassBackdrop {
 
 impl GlassBackdrop {
     /// Creates the glass window. Returns `None` when composition or host
-    /// backdrop brushes are unavailable; the caller then keeps the captured
-    /// backdrop fallback.
+    /// backdrop brushes are unavailable; the caller uses a theme gradient.
     pub fn create(
         x: i32,
         y: i32,
@@ -232,6 +235,7 @@ impl GlassBackdrop {
             _root: root,
             geometry,
             tint,
+            input_bounds: (0, 0, 0),
             _backdrop: backdrop,
             _tint_visual: tint_visual,
             _compositor: compositor,
@@ -282,12 +286,44 @@ impl GlassBackdrop {
         let _ = self
             .geometry
             .SetSize(Vector2::new(width as f32, height as f32));
-        let corner = (radius * 2.0).max(0.0);
+        let corner = (radius * 2.0).clamp(0.0, width.min(height) as f32);
+        self.clip_input_bounds(width, height, corner.ceil() as u32);
         let _ = self
             .geometry
             .SetCornerRadius(Vector2::new(corner / 2.0, corner / 2.0));
         let _ = self.tint.SetColor(tint_color(dark));
         let _ = self._root.SetOpacity(opacity.clamp(0.0, 1.0));
+    }
+
+    // Win32 can test the backdrop before its window procedure runs. Clip
+    // its otherwise rectangular corners to the real bar, so a click outside
+    // the Dock cannot land on an invisible corner of the glass HWND.
+    fn clip_input_bounds(&mut self, width: u32, height: u32, diameter: u32) {
+        let key = (width, height, diameter);
+        if self.input_bounds == key {
+            return;
+        }
+        unsafe {
+            let region = if diameter == 0 {
+                CreateRectRgn(0, 0, width as i32, height as i32)
+            } else {
+                CreateRoundRectRgn(
+                    0,
+                    0,
+                    width as i32,
+                    height as i32,
+                    diameter as i32,
+                    diameter as i32,
+                )
+            };
+            if !region.is_invalid() {
+                if SetWindowRgn(self.hwnd, Some(region), true) == 0 {
+                    let _ = DeleteObject(HGDIOBJ(region.0));
+                } else {
+                    self.input_bounds = key;
+                }
+            }
+        }
     }
 
     /// Forces DWM to process pending composition changes before returning.
