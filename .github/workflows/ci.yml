@@ -164,7 +164,7 @@ jobs:
             release-assets/Glide-Dock-v*-Setup.exe.sha256
 
   publish-cnb:
-    needs: publish-github
+    needs: release
     runs-on: ubuntu-latest
     permissions:
       contents: read
