@@ -10,6 +10,7 @@ export interface UpdateEligibility { allowed: boolean; title: string; message: s
 export interface SetupInfo {
   version: string;
   mode: Mode;
+  auto_update: boolean;
   payload_ready: boolean;
   update_eligibility: UpdateEligibility | null;
   install_directory: string;

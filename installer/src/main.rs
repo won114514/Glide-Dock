@@ -40,6 +40,7 @@ const PRODUCT_TITLE: &str = if UNINSTALL_ONLY {
 
 struct Session {
     mode: &'static str,
+    auto_update: bool,
     existing: Option<InstallRecord>,
     operation: Mutex<Option<String>>,
 }
@@ -48,6 +49,7 @@ struct Session {
 struct SetupInfo {
     version: &'static str,
     mode: &'static str,
+    auto_update: bool,
     payload_ready: bool,
     update_eligibility: Option<version::UpdateEligibility>,
     install_directory: String,
@@ -134,6 +136,7 @@ fn main() {
     }
     let session = Session {
         mode,
+        auto_update: args.iter().any(|arg| arg == "--auto-update"),
         existing,
         operation: Mutex::new(None),
     };
@@ -250,6 +253,11 @@ fn initial_mode(
     args: &[String],
     installed: bool,
 ) -> Result<&'static str, &'static str> {
+    let auto_update = args.iter().any(|arg| arg == "--auto-update");
+    if auto_update && (uninstall_only || !installed || args.iter().any(|arg| arg == "--uninstall"))
+    {
+        return Err("自动更新参数只适用于已安装 Glide-Dock 的安装程序。请手动运行安装程序。");
+    }
     if uninstall_only && args.iter().any(|arg| arg == "--update") {
         return Err("这是 Glide-Dock 卸载程序，更新请运行下载的新版安装包。");
     }
@@ -302,6 +310,7 @@ fn setup_info(session: State<'_, Session>) -> Result<SetupInfo, String> {
     Ok(SetupInfo {
         version: env!("CARGO_PKG_VERSION"),
         mode: session.mode,
+        auto_update: session.auto_update,
         payload_ready: engine::installer_ready(),
         update_eligibility: if session.mode == "update" {
             existing.as_ref().map(engine::update_eligibility)
@@ -896,6 +905,7 @@ mod routing_tests {
     fn canceled_operation_uac_leaves_original_file_and_allows_retry() {
         let session = Session {
             mode: "install",
+            auto_update: false,
             existing: None,
             operation: Mutex::new(None),
         };
@@ -946,6 +956,7 @@ mod routing_tests {
         ] {
             let session = Session {
                 mode: "install",
+                auto_update: false,
                 existing: None,
                 operation: Mutex::new(None),
             };
@@ -979,6 +990,7 @@ mod routing_tests {
     fn failed_background_dispatch_leaves_no_active_operation() {
         let session = Session {
             mode: "install",
+            auto_update: false,
             existing: None,
             operation: Mutex::new(None),
         };
@@ -1008,6 +1020,21 @@ mod routing_tests {
             initial_mode(false, &["--update".into()], true).unwrap(),
             "update"
         );
+        assert_eq!(
+            initial_mode(false, &["--auto-update".into()], true).unwrap(),
+            "update"
+        );
+    }
+
+    #[test]
+    fn auto_update_requires_a_registered_install_and_cannot_uninstall() {
+        let auto_update = ["--auto-update".into()];
+        assert!(initial_mode(false, &auto_update, false).is_err());
+        assert!(initial_mode(true, &auto_update, true).is_err());
+        assert!(
+            initial_mode(false, &["--auto-update".into(), "--uninstall".into()], true).is_err()
+        );
+        assert_eq!(initial_mode(false, &auto_update, true).unwrap(), "update");
     }
 
     #[test]
@@ -1015,6 +1042,7 @@ mod routing_tests {
         assert_eq!(initial_mode(true, &[], true).unwrap(), "uninstall");
         assert!(initial_mode(true, &[], false).is_err());
         assert!(initial_mode(true, &["--update".into()], true).is_err());
+        assert!(initial_mode(true, &["--auto-update".into()], true).is_err());
         assert_eq!(
             initial_mode(false, &["--uninstall".into()], true).unwrap(),
             "uninstall"

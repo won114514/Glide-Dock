@@ -7,7 +7,7 @@ import type { MockOptions } from './mock';
 async function open(page: Page, options: MockOptions = {}) {
   await page.addInitScript(setupMock, options);
   await page.goto('/');
-  await expect(page.locator('#version')).toHaveText('v0.4.3');
+  await expect(page.locator('#version')).toHaveText('v0.4.4');
 }
 async function preferences(page: Page) {
   await expect(page.locator('#primary-button')).toBeEnabled();
@@ -216,6 +216,36 @@ test('update preserves settings and sends only the update operation', async ({ p
   const call = await page.evaluate(() => (window as any).__calls.find((call: any) => call.command === 'start_install'));
   expect(call.args.update).toBe(true); expect(call.args.options.update).toBe(true);
   expect(call.args.options.selected_apps).toEqual([]); expect(call.args.options.enable_startup).toBe(false);
+});
+
+test('auto-update argument skips checklist, runs preflight, and enters update progress', async ({ page }) => {
+  await open(page, { mode: 'update', autoUpdate: true, holdOperation: true });
+  await expect(page.locator('#auto-update-page')).toBeVisible();
+  await expect(page.locator('#confirm-page')).toHaveCount(0);
+  await expect(page.locator('#setup-page')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => (window as any).__calls.some((call: any) => call.command === 'check_destination' && call.args.update === true))).toBe(true);
+  await expect(page.getByRole('progressbar', { name: '操作进度' })).toBeVisible();
+  await expect(page.locator('#operation-message')).toHaveAttribute('title', '正在处理程序文件…');
+  const call = await page.evaluate(() => (window as any).__calls.find((call: any) => call.command === 'start_install'));
+  expect(call.args.update).toBe(true);
+  expect(call.args.options.update).toBe(true);
+  expect(call.args.options.launch_after_install).toBe(true);
+});
+
+test('auto-update stops before starting when preflight checks fail', async ({ page }) => {
+  await open(page, { mode: 'update', autoUpdate: true, failedCheck: true });
+  await expect(page.locator('#auto-update-page')).toBeVisible();
+  await expect(page.getByText('安装包数据不完整，请重新下载。')).toBeVisible();
+  await page.waitForTimeout(250);
+  expect(await page.evaluate(() => (window as any).__calls.some((call: any) => call.command === 'start_install'))).toBe(false);
+});
+
+test('auto-update reports blocked installed-version eligibility instead of silently waiting', async ({ page }) => {
+  await open(page, { mode: 'update', autoUpdate: true, updateBlocked: 'same' });
+  await expect(page.locator('#auto-update-page')).toBeVisible();
+  await expect(page.getByText(/请使用更高版本的安装包/).first()).toBeVisible();
+  await page.waitForTimeout(250);
+  expect(await page.evaluate(() => (window as any).__calls.some((call: any) => call.command === 'start_install'))).toBe(false);
 });
 
 test('starting and running operations prevent duplicate requests and window closure', async ({ page }) => {

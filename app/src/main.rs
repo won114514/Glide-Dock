@@ -8,6 +8,7 @@ mod launcher;
 mod presenter;
 mod preview;
 mod render_loop;
+mod update;
 mod wndproc;
 
 use std::path::PathBuf;

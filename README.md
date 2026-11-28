@@ -21,7 +21,7 @@ Glide-Dock 是一个用 **Rust + Win32** 实现的常驻桌面启动栏：首次
 
 ## 当前状态
 
-**v0.4.3 · M2 MVP 已完成，M3 部分完成，M4 设置中心与五层动效系统已落地。**
+**v0.4.4 · M2 MVP 已完成，M3 部分完成，M4 设置中心与五层动效系统已落地。**
 
 | 能力 | 状态 |
 | --- | --- |
@@ -87,7 +87,7 @@ Glide-Dock 是一个用 **Rust + Win32** 实现的常驻桌面启动栏：首次
 > Medium 完整性包，或把 zip 解压到桌面再运行。
 
 ```powershell
-# 推荐：构建并打包到 %LOCALAPPDATA%\Glide-Dock\Glide-Dock-v0.4.3（Medium 完整性）
+# 推荐：构建并打包到 %LOCALAPPDATA%\Glide-Dock\Glide-Dock-v0.4.4（Medium 完整性）
 powershell -ExecutionPolicy Bypass -File scripts/package.ps1
 
 # 构建品牌安装包（单文件 Setup.exe；输出到 %LOCALAPPDATA%\Glide-Dock\installer）

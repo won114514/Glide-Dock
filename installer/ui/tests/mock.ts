@@ -1,6 +1,7 @@
 export interface MockOptions {
   cleanupWarning?: boolean;
   mode?: 'install' | 'update' | 'uninstall';
+  autoUpdate?: boolean;
   updateBlocked?: 'same' | 'older' | 'unknown';
   setupError?: boolean;
   missingPayload?: boolean;
@@ -16,13 +17,13 @@ export interface MockOptions {
 export function setupMock(options: MockOptions = {}) {
   const win = window as any;
   const mode = options.mode ?? 'install';
-  const existing = mode === 'install' ? null : { scope: 'current-user', version: options.updateBlocked === 'same' ? '0.4.3' : options.updateBlocked === 'older' ? '0.5.0' : options.updateBlocked === 'unknown' ? null : '0.4.1', install_directory: 'C:\\Users\\演示用户\\AppData\\Local\\Programs\\Glide-Dock' };
+  const existing = mode === 'install' ? null : { scope: 'current-user', version: options.updateBlocked === 'same' ? '0.4.4' : options.updateBlocked === 'older' ? '0.5.0' : options.updateBlocked === 'unknown' ? null : '0.4.3', install_directory: 'C:\\Users\\演示用户\\AppData\\Local\\Programs\\Glide-Dock' };
   const info = {
-    version: '0.4.3', mode, payload_ready: mode !== 'uninstall' && !options.missingPayload,
+    version: '0.4.4', mode, auto_update: !!options.autoUpdate, payload_ready: mode !== 'uninstall' && !options.missingPayload,
     update_eligibility: mode === 'update' ? {
       allowed: !options.updateBlocked,
       title: options.updateBlocked === 'same' ? '已安装此版本' : options.updateBlocked === 'older' ? '安装包版本较旧' : options.updateBlocked === 'unknown' ? '无法判断已安装版本' : '准备更新',
-      message: options.updateBlocked ? '请使用更高版本的安装包。卸载请使用 Windows“已安装的应用”。' : '将 Glide-Dock 从 0.4.2 更新到 0.4.3，保留当前设置和 Dock 条目。',
+      message: options.updateBlocked ? '请使用更高版本的安装包。卸载请使用 Windows“已安装的应用”。' : '将 Glide-Dock 从 0.4.3 更新到 0.4.4，保留当前设置和 Dock 条目。',
     } : null,
     install_directory: existing?.install_directory ?? 'C:\\Users\\演示用户\\AppData\\Local\\Programs\\Glide-Dock', existing,
     checks: [{ name: '系统兼容性', passed: true, message: 'Windows 11，64 位系统。' },

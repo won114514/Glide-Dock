@@ -64,7 +64,7 @@ function Sidebar({ state }: { state: InstallerState }) {
         </Tab>)}
       </TabList>
     </nav> : <div className="sidebar-current"><span className="sidebar-current-icon">{state.complete ? <CheckmarkCircle32Regular /> : <Apps20Regular />}</span><Text>{state.complete ? '操作已完成' : state.mode === 'uninstall' ? '卸载 Glide-Dock' : '更新 Glide-Dock'}</Text><Caption1>{state.complete ? '现在可以关闭此窗口' : state.mode === 'uninstall' ? '移除程序，默认保留设置' : '使用新版安装包更新'}</Caption1></div>}
-    <div className="sidebar-note"><ShieldCheckmark20Regular /><span><Text size={200}>为 Windows 设计</Text><Caption1>Glide-Dock · v{state.info?.version ?? '0.4.3'}</Caption1></span></div>
+    <div className="sidebar-note"><ShieldCheckmark20Regular /><span><Text size={200}>为 Windows 设计</Text><Caption1>Glide-Dock{state.info ? ` · v${state.info.version}` : ''}</Caption1></span></div>
   </aside>;
 }
 
@@ -168,6 +168,29 @@ function Confirmation({ state: s }: { state: InstallerState }) {
   </section>;
 }
 
+function AutomaticUpdatePage({ state: s }: { state: InstallerState }) {
+  const checksFailed = s.info?.checks.some(check => !check.passed) ?? false;
+  return <section className="page" id="auto-update-page">
+    <Intro title={s.phase === 'complete' ? '更新已完成' : s.phase === 'failed' ? '更新未能开始' : '正在准备自动更新'}>
+      {s.feedback.message}
+    </Intro>
+    <Card appearance="outline" className="summary-card">
+      <dl className="install-summary">
+        <div><dt>当前版本</dt><dd>{s.info?.existing?.version ?? '未知'}</dd></div>
+        <div><dt>目标版本</dt><dd>{s.info?.version ?? ''}</dd></div>
+        <div><dt>安装位置</dt><dd id="summary-path">{s.installPath}</dd></div>
+        <div><dt>设置与 Dock 条目</dt><dd>保留</dd></div>
+      </dl>
+    </Card>
+    {s.checking && <Spinner size="small" label="正在检查更新条件…" />}
+    {!s.info?.payload_ready && <MessageBar intent="error"><MessageBarBody>安装包资源不完整，无法执行更新。请重新下载完整的安装包。</MessageBarBody></MessageBar>}
+    {s.info?.update_eligibility && !s.info.update_eligibility.allowed && <MessageBar intent="error"><MessageBarBody>{s.info.update_eligibility.message}</MessageBarBody></MessageBar>}
+    {!s.checking && !s.destination.valid && s.destination.message && <MessageBar intent="error"><MessageBarBody>{s.destination.message}</MessageBarBody></MessageBar>}
+    {checksFailed && <div className="preflight"><EnvironmentChecks state={s} /></div>}
+    {s.scope === 'all-users' && <Caption1 className="muted">此更新需要 Windows 管理员确认。</Caption1>}
+  </section>;
+}
+
 function UninstallPage({ state: s }: { state: InstallerState }) {
   return <section className="page management-page" id="uninstall-view">
     <div className="manage-brand"><img src={brandMark} alt="" /><Badge appearance="tint" color="brand">已安装</Badge></div>
@@ -224,6 +247,7 @@ export default function App() {
           : !state.info ? <div className="loading-state"><Spinner size="small" label="正在检查安装信息…" /></div>
           : state.complete ? <section className="page completion-page" id="completion-view"><CheckmarkCircle32Regular className="completion-icon" /><Intro title={completionTitle}>{state.mode === 'uninstall' ? 'Glide-Dock 程序文件已移除。' : 'Glide-Dock 已准备就绪。之后可以从桌面或开始菜单打开。'}</Intro></section>
           : state.mode === 'uninstall' ? <UninstallPage state={state} />
+          : state.mode === 'update' && state.info.auto_update ? <AutomaticUpdatePage state={state} />
           : state.mode === 'update' || state.page === 'confirm' ? <Confirmation state={state} />
           : state.page === 'setup' ? <Preferences state={state} /> : <Location state={state} />}
         {showFeedbackDetails && <div className="feedback-details"><MessageBar intent={state.feedback.intent === 'error' ? 'error' : 'warning'}><MessageBarBody>{state.feedback.message}</MessageBarBody></MessageBar></div>}

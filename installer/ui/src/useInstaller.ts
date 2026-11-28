@@ -34,6 +34,7 @@ export function useInstaller() {
   const [progress, setProgress] = useState<number | null>(null);
   const [phase, setPhase] = useState<'idle' | 'running' | 'complete' | 'failed'>('idle');
   const busyRef = useRef(false);
+  const autoStarted = useRef(false);
   const scopeRequest = useRef(0);
   const lastProgress = useRef(0);
   const busy = pending || token !== null;
@@ -92,6 +93,13 @@ export function useInstaller() {
     }, 180);
     return () => { cancelled = true; window.clearTimeout(timer); };
   }, [info, installPath, scope, mode, busy, complete]);
+
+  useEffect(() => {
+    if (!info?.auto_update || mode !== 'update' || phase !== 'idle' || busyRef.current
+      || checking || !destination.valid || !canInstall || autoStarted.current) return;
+    autoStarted.current = true;
+    void beginInstall();
+  }, [info, mode, phase, checking, destination.valid, canInstall]);
 
   useEffect(() => {
     if (!token) return;
@@ -235,8 +243,8 @@ export function useInstaller() {
   else if (info) {
     if (mode === 'uninstall') { primaryLabel = phase === 'failed' ? '重试卸载' : '确认卸载…'; primaryAction = () => setUninstallOpen(true); }
     else if (mode === 'update' || page === 'confirm') {
-      primaryLabel = mode === 'update' ? (phase === 'failed' ? '重试更新' : '安装更新') : (phase === 'failed' ? '重试安装' : '开始安装');
-      primaryDisabled = !destination.valid || checking || !canInstall;
+      primaryLabel = mode === 'update' ? (phase === 'failed' ? '重试更新' : info.auto_update ? '正在准备更新…' : '安装更新') : (phase === 'failed' ? '重试安装' : '开始安装');
+      primaryDisabled = info.auto_update && phase !== 'failed' || !destination.valid || checking || !canInstall;
       primaryAction = () => { void beginInstall(); };
     } else { primaryLabel = page === 'location' ? '下一步' : '查看安装清单'; primaryDisabled = page === 'location' && (!destination.valid || checking); }
   }

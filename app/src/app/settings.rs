@@ -26,14 +26,13 @@ use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetShellWindow, GetWindowThreadProcessId, PostMessageW, WM_APP,
+    GetShellWindow, GetWindowThreadProcessId, PostMessageW,
 };
 
-use super::{DockApp, palette_for, resolve_theme};
+use super::{DockApp, WM_APP_SETTINGS_COMMAND, palette_for, resolve_theme};
 
 slint::include_modules!();
 
-pub(super) const WM_APP_SETTINGS_COMMAND: u32 = WM_APP + 7;
 const GUARD_MUTEX_NAME: &str = r"Local\Glide-Dock.Guard";
 const UAC_REGISTRY_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System";
 const APP_COMPAT_REGISTRY_KEY: &str =
@@ -77,6 +76,10 @@ pub(super) enum SettingsCommand {
     RefreshDiagnostics,
     CopyDiagnostics,
     CopyMotionConfig,
+    CheckForUpdates,
+    InstallUpdate,
+    OpenCnbReleases,
+    OpenGithubReleases,
     LaunchFailed(String),
 }
 
@@ -88,6 +91,7 @@ pub(super) struct SettingsUpdate {
     startup: Option<(bool, StartupMode)>,
     font_id: Option<String>,
     system_dark: Option<bool>,
+    update_view: Option<crate::update::UpdateSnapshot>,
     show: bool,
 }
 
@@ -234,6 +238,13 @@ impl SettingsHost {
             tracing::debug!(%error, "could not update settings window");
         }
     }
+
+    pub(super) fn update_update_view(&self, snapshot: crate::update::UpdateSnapshot) {
+        self.update(SettingsUpdate {
+            update_view: Some(snapshot),
+            ..Default::default()
+        });
+    }
 }
 
 fn run_settings_window(
@@ -353,6 +364,10 @@ fn run_settings_window(
             "refresh-diagnostics" => SettingsCommand::RefreshDiagnostics,
             "copy-diagnostics" => SettingsCommand::CopyDiagnostics,
             "copy-motion" => SettingsCommand::CopyMotionConfig,
+            "check-updates" => SettingsCommand::CheckForUpdates,
+            "install-update" => SettingsCommand::InstallUpdate,
+            "open-cnb-releases" => SettingsCommand::OpenCnbReleases,
+            "open-github-releases" => SettingsCommand::OpenGithubReleases,
             _ => return,
         };
         notify_dock(owner, &actions, command);
@@ -405,6 +420,9 @@ fn apply_update(window: &SettingsWindow, update: SettingsUpdate) {
     if let Some(font_id) = update.font_id {
         window.set_font_id(font_id.into());
     }
+    if let Some(update_view) = update.update_view {
+        apply_update_view(window, &update_view);
+    }
     let visible = window.window().is_visible();
     if let Some(values) = update.values {
         populate_values(window, &values);
@@ -421,6 +439,22 @@ fn apply_update(window: &SettingsWindow, update: SettingsUpdate) {
             native.focus_window();
         });
     }
+}
+
+fn apply_update_view(window: &SettingsWindow, update: &crate::update::UpdateSnapshot) {
+    window.set_update_managed(update.managed);
+    window.set_update_checking(update.checking);
+    window.set_update_downloading(update.downloading);
+    window.set_update_ready(update.ready);
+    window.set_update_launching(update.launching);
+    window.set_update_progress(update.progress as f32 / 100.0);
+    window.set_update_message(update.status.clone().into());
+    window.set_update_version(update.latest_version.clone().into());
+    window.set_update_source(update.source.clone().into());
+    window.set_update_cnb_status(update.cnb_status.clone().into());
+    window.set_update_github_status(update.github_status.clone().into());
+    window.set_update_last_check(update.last_check_text.clone().into());
+    window.set_update_notes(update.release_notes.clone().into());
 }
 
 fn populate_window(
@@ -800,11 +834,26 @@ impl DockApp {
                         ..Default::default()
                     });
                 }
+                SettingsCommand::CheckForUpdates => {
+                    self.updater.check_now();
+                    self.settings.update_update_view(self.updater.snapshot());
+                }
+                SettingsCommand::InstallUpdate => {
+                    self.updater.launch_update();
+                    self.settings.update_update_view(self.updater.snapshot());
+                }
+                SettingsCommand::OpenCnbReleases => {
+                    let _ = open_path("https://cnb.cool/won114514/Glide-Dock/-/releases");
+                }
+                SettingsCommand::OpenGithubReleases => {
+                    let _ = open_path("https://github.com/won114514/Glide-Dock/releases");
+                }
                 SettingsCommand::LaunchFailed(error) => {
                     self.set_error(format!("设置窗口启动失败：{error}"));
                 }
             }
         }
+        self.settings.update_update_view(self.updater.snapshot());
     }
 
     fn apply_settings(&mut self, mut values: SettingsValues) {
@@ -1018,4 +1067,60 @@ fn diagnostic_start_menu_shortcut() -> String {
         .map(|root| root.join("Microsoft/Windows/Start Menu/Programs/Glide-Dock/Glide-Dock.lnk"))
         .find(|path| path.is_file())
         .map_or_else(|| "未找到".into(), |path| path.display().to_string())
+}
+
+#[cfg(test)]
+mod update_view_tests {
+    use super::*;
+
+    #[test]
+    fn about_page_receives_no_update_downloading_ready_and_failure_states() {
+        let window = SettingsWindow::new().expect("settings component should initialize");
+        let mut snapshot = crate::update::UpdateSnapshot::default();
+        snapshot.managed = true;
+        snapshot.status = format!("当前已是最新版本 v{}。", env!("CARGO_PKG_VERSION"));
+        apply_update_view(&window, &snapshot);
+        assert!(window.get_update_managed());
+        assert_eq!(
+            window.get_update_message().as_str(),
+            snapshot.status.as_str()
+        );
+        assert!(!window.get_update_ready());
+
+        snapshot.checking = true;
+        snapshot.status = "正在同时检查 CNB 与 GitHub…".into();
+        apply_update_view(&window, &snapshot);
+        assert!(window.get_update_checking());
+        assert_eq!(
+            window.get_update_message().as_str(),
+            "正在同时检查 CNB 与 GitHub…"
+        );
+
+        snapshot.checking = false;
+        snapshot.downloading = true;
+        snapshot.latest_version = "0.5.0".into();
+        snapshot.progress = 42;
+        snapshot.status = "发现 v0.5.0，正在下载并验证安装包…".into();
+        apply_update_view(&window, &snapshot);
+        assert!(window.get_update_downloading());
+        assert_eq!(window.get_update_version().as_str(), "0.5.0");
+        assert!((window.get_update_progress() - 0.42).abs() < 0.001);
+
+        snapshot.downloading = false;
+        snapshot.ready = true;
+        snapshot.source = "CNB".into();
+        snapshot.status = "v0.5.0 已下载并校验完成，确认后即可安装。".into();
+        apply_update_view(&window, &snapshot);
+        assert!(window.get_update_ready());
+        assert_eq!(window.get_update_source().as_str(), "CNB");
+
+        snapshot.ready = false;
+        snapshot.status = "新版 v0.5.0 下载失败，请重试。".into();
+        apply_update_view(&window, &snapshot);
+        assert!(!window.get_update_ready());
+        assert_eq!(
+            window.get_update_message().as_str(),
+            "新版 v0.5.0 下载失败，请重试。"
+        );
+    }
 }

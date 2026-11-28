@@ -54,11 +54,12 @@ use crate::wndproc::dock_wndproc;
 mod frame_stats;
 mod settings;
 use frame_stats::FrameStats;
-use settings::{SettingsHost, SettingsValues, WM_APP_SETTINGS_COMMAND};
+use settings::{SettingsHost, SettingsValues};
 
 /// Mouse leave notification (defined in Win32::UI::Controls).
 const WM_MOUSELEAVE: u32 = 0x02A3;
 pub const WM_APP_OPEN_SETTINGS: u32 = WM_APP + 8;
+pub(crate) const WM_APP_SETTINGS_COMMAND: u32 = WM_APP + 7;
 
 const TIMER_TOOLTIP: usize = 2;
 const TIMER_SAVE: usize = 3;
@@ -273,6 +274,7 @@ pub struct DockApp {
     native_glass: bool,
     glass_failed: bool,
     settings: SettingsHost,
+    updater: crate::update::UpdateService,
     tray: Option<TrayIcon>,
     tray_menu: Option<TrayMenuView>,
     _window_tracker: Option<WindowTracker>,
@@ -327,6 +329,7 @@ impl DockApp {
         let icon_service = IconService::spawn(hwnd);
         let resolve_service = ResolveService::spawn(hwnd);
         let window_tracker = WindowTracker::install(hwnd);
+        let updater = crate::update::UpdateService::new(persist, hwnd.0 as isize);
         let mut renderer = Renderer::new();
         let build = windows_build();
         renderer.set_start_style(if build == 0 || build >= 22000 {
@@ -379,6 +382,7 @@ impl DockApp {
             native_glass: false,
             glass_failed: false,
             settings: SettingsHost::default(),
+            updater,
             tray: None,
             tray_menu: None,
             _window_tracker: window_tracker,
@@ -1942,6 +1946,8 @@ impl DockApp {
         if let Err(error) = self.settings.open(self.hwnd, values, self.store.path()) {
             tracing::error!(%error, "failed to open settings");
             self.set_error(format!("无法打开设置窗口：{error}"));
+        } else {
+            self.settings.update_update_view(self.updater.snapshot());
         }
     }
 
