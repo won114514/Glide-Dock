@@ -59,7 +59,27 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-  test:
+  test-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: installer/ui/package-lock.json
+      - name: Test installer interface
+        working-directory: installer/ui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          npx playwright install --with-deps chromium
+          npm test
+      - name: Test CNB publisher
+        run: node --test scripts/tests/publish-cnb.test.mjs scripts/tests/mirror-github-release.test.mjs
+
+  test-rust:
     needs: frontend
     runs-on: windows-latest
     steps:
@@ -68,32 +88,18 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-      - name: Install Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: installer/ui/package-lock.json
       - name: Download installer frontend
         uses: actions/download-artifact@v8
         with:
           name: installer-ui-dist
           path: target/installer-ui
-      - name: Test installer interface
-        working-directory: installer/ui
-        run: |
-          npm ci --no-audit --no-fund
-          npx playwright install chromium
-          npm test
-      - name: Test CNB publisher
-        run: node --test scripts/tests/publish-cnb.test.mjs scripts/tests/mirror-github-release.test.mjs
       - name: Test
         env:
           RUST_TEST_THREADS: 1
         run: cargo test --locked --workspace
 
   release:
-    needs: [lint, test]
+    needs: [lint, test-ui, test-rust]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
