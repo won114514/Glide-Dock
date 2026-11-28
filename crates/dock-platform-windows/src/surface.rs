@@ -125,6 +125,18 @@ impl LayeredSurface {
 
     /// Copies a premultiplied RGBA pixmap into the DIB and presents it.
     pub fn present(&mut self, width: u32, height: u32, rgba: &[u8]) -> Result<()> {
+        self.present_alpha(width, height, rgba, 255)
+    }
+
+    /// Copies a premultiplied RGBA pixmap into the DIB and presents it with
+    /// an overall window alpha (`0..=255`).
+    pub fn present_alpha(
+        &mut self,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+        opacity: u8,
+    ) -> Result<()> {
         // Validate before resize: a truncated buffer must not destroy the
         // current, still-valid DIB.
         let expected = (width.max(1) as usize)
@@ -161,7 +173,7 @@ impl LayeredSurface {
         let blend = BLENDFUNCTION {
             BlendOp: AC_SRC_OVER as u8,
             BlendFlags: 0,
-            SourceConstantAlpha: 255,
+            SourceConstantAlpha: opacity,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
         unsafe {

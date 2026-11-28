@@ -1,0 +1,248 @@
+import { Button, Palette, ScrollView } from "std-widgets.slint";
+import { SettingsStyle } from "styles.slint";
+import { CaptionButton } from "window-controls.slint";
+
+export component NoticeDialog inherits Window {
+    in property <string> kind: "elevated"; // "builtin-admin" | "elevated"
+    in property <string> theme: "system";
+    in property <bool> system-dark: false;
+    in property <string> font-id: "noto-sans-sc";
+    in property <length> available-width: 1920px;
+    in property <length> available-height: 1080px;
+    in-out property <string> feedback-message: "";
+
+    property <bool> is-builtin: root.kind == "builtin-admin";
+    out property <bool> builtin-mode: root.is-builtin;
+    out property <string> dialog-title: root.is-builtin ? "建议开启内置管理员审批模式" : "检测到管理员权限";
+    property <bool> dark-mode: root.theme == "dark" || (root.theme == "system" && root.system-dark);
+    property <length> target-width: root.is-builtin ? 620px : 520px;
+    property <length> target-height: root.is-builtin ? 540px : 292px;
+
+    title: root.dialog-title;
+    no-frame: true;
+    min-width: min(440px, root.available-width);
+    min-height: min(250px, root.available-height);
+    preferred-width: min(root.target-width, root.available-width);
+    preferred-height: min(root.target-height, root.available-height);
+    background: SettingsStyle.canvas;
+    default-font-family: root.font-id == "noto-sans-sc" ? "Noto Sans SC" : "Segoe UI";
+    default-font-size: 13px;
+
+    callback action(string);
+
+    init => { root.sync-palette(); }
+    changed dark-mode => { root.sync-palette(); }
+    function sync-palette() {
+        SettingsStyle.dark = root.dark-mode;
+        Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light;
+    }
+
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        background: SettingsStyle.canvas;
+        border-color: SettingsStyle.line;
+        border-width: 1px;
+
+        VerticalLayout {
+            spacing: 0px;
+
+            // Custom frameless title bar
+            Rectangle {
+                height: 42px;
+                background: SettingsStyle.sidebar;
+                HorizontalLayout {
+                    spacing: 0px;
+                    WindowMoveArea {
+                        horizontal-stretch: 1;
+                        HorizontalLayout {
+                            padding-left: 14px;
+                            spacing: 8px;
+                            VerticalLayout {
+                                alignment: center;
+                                Image {
+                                    source: @image-url("../../assets/brand/01-Logo/Glide-Dock-Logo-Symbol.svg");
+                                    width: 18px;
+                                    height: 18px;
+                                }
+                            }
+                            Text {
+                                text: root.title;
+                                color: SettingsStyle.text;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        padding: 5px;
+                        CaptionButton {
+                            icon: "close";
+                            label: "关闭";
+                            foreground: SettingsStyle.text;
+                            destructive: true;
+                            clicked => { root.action("close"); }
+                        }
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: SettingsStyle.line; }
+
+            // Dialog body
+            VerticalLayout {
+                vertical-stretch: 1;
+                padding-left: 24px;
+                padding-right: 24px;
+                padding-top: 20px;
+                padding-bottom: 20px;
+                spacing: 14px;
+
+                Text {
+                    text: root.title;
+                    color: SettingsStyle.text;
+                    font-size: 20px;
+                    font-weight: 600;
+                    wrap: word-wrap;
+                }
+
+                if !root.is-builtin: VerticalLayout {
+                    vertical-stretch: 1;
+                    spacing: 12px;
+
+                    Text {
+                        text: "Glide-Dock 正在以管理员身份运行，Windows 会阻止资源管理器与提权应用之间拖放文件。请点击下方按钮退出，再双击图标以普通方式重新打开 Glide-Dock 即可恢复。Glide-Dock 无需管理员权限即可正常使用。\n若重新打开后仍出现此提示，请右键快捷方式，选择属性，取消“以管理员身份运行”的勾选。";
+                        color: SettingsStyle.muted;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+
+                    Rectangle { vertical-stretch: 1; background: transparent; }
+
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 8px;
+                        Button {
+                            text: "退出 Glide-Dock";
+                            primary: true;
+                            height: 36px;
+                            min-width: 136px;
+                            clicked => { root.action("quit-dock"); }
+                        }
+                    }
+                }
+
+                if root.is-builtin: VerticalLayout {
+                    vertical-stretch: 1;
+                    spacing: 12px;
+
+                    Text {
+                        text: "检测到当前使用 Windows 内置 Administrator 账号，且尚未开启「用于内置管理员账户的管理员批准模式」。在此模式下所有桌面程序默认以完整管理员权限启动，会导致资源管理器无法向 Glide-Dock 拖放文件。请按以下组策略步骤开启审批模式：";
+                        color: SettingsStyle.muted;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                    }
+
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: SettingsStyle.surface;
+                        border-color: SettingsStyle.line;
+                        border-width: 1px;
+                        border-radius: 8px;
+
+                        ScrollView {
+                            width: 100%;
+                            height: 100%;
+                            horizontal-scrollbar-policy: always-off;
+                            content-width: self.width;
+                            VerticalLayout {
+                                padding: 14px;
+                                padding-right: 18px;
+                                spacing: 8px;
+
+                                Text {
+                                    text: "方法一：通过本地安全策略 / 组策略修改（推荐）";
+                                    color: SettingsStyle.text;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: "1. 按 Win + R 打开“运行”，输入 secpol.msc 并回车（或点击下方“打开本地安全策略”按钮）；也可输入 gpedit.msc 打开“本地组策略编辑器”，依次展开：\n   计算机配置 → Windows 设置 → 安全设置 → 本地策略 → 安全选项";
+                                    color: SettingsStyle.muted;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: "2. 在右侧策略列表中找到：\n   「用户账户控制: 用于内置管理员账户的管理员批准模式」\n   双击打开后选择「已启用」，点击“确定”。";
+                                    color: SettingsStyle.muted;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: "3. 同时确认同一列表中的：\n   「用户账户控制: 以管理员批准模式运行所有管理员」也为「已启用」。";
+                                    color: SettingsStyle.muted;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: "4. 注销或重启电脑后生效，之后即可使用普通权限运行 Glide-Dock 并正常拖放。";
+                                    color: SettingsStyle.muted;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+
+                                Rectangle { height: 1px; background: SettingsStyle.line; }
+
+                                Text {
+                                    text: "方法二：Windows 家庭版（无组策略编辑器时）";
+                                    color: SettingsStyle.text;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: "以管理员身份打开终端（PowerShell 或命令提示符），运行以下命令启用审批模式后重启电脑：\nreg add \"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\" /v FilterAdministratorToken /t REG_DWORD /d 1 /f";
+                                    color: SettingsStyle.muted;
+                                    font-size: 12px;
+                                    wrap: char-wrap;
+                                }
+                            }
+                        }
+                    }
+
+                    if root.feedback-message != "": Text {
+                        text: root.feedback-message;
+                        color: SettingsStyle.muted;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button {
+                            text: "打开本地安全策略";
+                            height: 36px;
+                            clicked => { root.action("open-secpol"); }
+                        }
+                        Button {
+                            text: "复制命令";
+                            height: 36px;
+                            clicked => { root.action("copy-command"); }
+                        }
+                        Rectangle { horizontal-stretch: 1; background: transparent; }
+                        Button {
+                            text: "我知道了";
+                            primary: true;
+                            height: 36px;
+                            min-width: 104px;
+                            clicked => { root.action("close"); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

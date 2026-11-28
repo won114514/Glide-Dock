@@ -21,7 +21,7 @@ Glide-Dock 是一个用 **Rust + Win32** 实现的常驻桌面启动栏：首次
 
 ## 当前状态
 
-**v0.4.4 · M2 MVP 已完成，M3 部分完成，M4 设置中心与五层动效系统已落地。**
+**v0.4.5 · M2 MVP 已完成，M3 部分完成，M4 设置中心与五层动效系统已落地。**
 
 | 能力 | 状态 |
 | --- | --- |
@@ -87,7 +87,7 @@ Glide-Dock 是一个用 **Rust + Win32** 实现的常驻桌面启动栏：首次
 > Medium 完整性包，或把 zip 解压到桌面再运行。
 
 ```powershell
-# 推荐：构建并打包到 %LOCALAPPDATA%\Glide-Dock\Glide-Dock-v0.4.4（Medium 完整性）
+# 推荐：构建并打包到 %LOCALAPPDATA%\Glide-Dock\Glide-Dock-v0.4.5（Medium 完整性）
 powershell -ExecutionPolicy Bypass -File scripts/package.ps1
 
 # 构建品牌安装包（单文件 Setup.exe；输出到 %LOCALAPPDATA%\Glide-Dock\installer）
@@ -129,7 +129,7 @@ cargo build --release -p glide-dock
 cargo run -p glide-dock -- --config .\preview\my-config.json
 ```
 
-发布时使用 `scripts\\build-installer.ps1` 生成的 Tauri 安装器；安装器会把 Rust Dock及其资源解包到目标目录。Dock/Slint 分发不再要求 .NET SDK、WinUI 发布目录或 `settings-app\\publish`。
+发布时使用 `scripts\\build-installer.ps1` 生成的 Tauri 安装器；安装器会把 Rust Dock及其资源解包到目标目录。Dock/Slint 分发不要求 .NET SDK 或 WinUI 发布目录。
 
 安装与更新由下载的新版安装 EXE 执行；权限足够时直接在当前进程的后台线程完成，只有需要 UAC 时才提权启动同一文件交接操作。只有版本更高的安装包允许更新；同版、旧版或无法识别已安装版本时均禁止覆盖。安装目录仅保留独立的 `Glide-Dock 卸载程序.exe`，不包含旧安装包数据，也不提供更新入口；卸载时仅在需要删除自身所在目录的情况下复制到临时目录。构建脚本会先生成 `glide-uninstall`，再将它与应用数据嵌入单文件安装包。卸载进程的工作目录始终位于安装目录之外，部分删除后仍可依据注册信息继续清理；程序文件已经移除时，残留空目录、快捷方式、卸载记录或个人数据的清理问题会显示为完成后的警告，仍有程序文件未删除时则保留卸载记录并允许重试。
 
@@ -211,14 +211,15 @@ GitHub 发布安装包后，同步主分支与版本标签到 CNB。CNB 原生�
 
 | 模式 | 机制 | 权限 | 特点 |
 | --- | --- | --- | --- |
-| 快速 | 当前用户登录触发的计划任务，无延迟，优先级 4 | 首次/删除需要管理员授权 | 登录后更早出现 |
+| 快速 | 仅当前用户登录触发的计划任务，无延迟，优先级 4 | 普通创建/删除无需管理员；仅旧任务 ACL 拒绝访问时提权 | 当前用户 SID + 交互式令牌 + 最低权限 |
 | 兼容 | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 值 `Glide-Dock` | 无需管理员 | Windows 11 可能主动延迟 |
 
 - 两种模式互斥；切换时先启用新模式，再清理旧模式；
 - 关闭开关会清理两种机制；
 - 模式偏好保存在 `%APPDATA%\Glide-Dock\startup-mode.txt`，不写入 config.json；
 - 计划任务动作带 `--autostart`，Dock 会短暂等待 `Progman` 桌面就绪；
-- UAC 取消时开关回退，不会留下半注册状态。
+- 快速任务使用当前用户 SID、`InteractiveToken` 和 `LeastPrivilege`，不会扩展到 Users 组其他用户；重复的 `--autostart` 会最佳努力修复已有任务，不创建被关闭的启动项；
+- UAC 取消时开关回退到无需管理员的兼容启动，不会留下半注册状态。
 
 ### 系统托盘与守护进程
 
@@ -229,7 +230,8 @@ Dock 运行时显示品牌托盘图标，右键菜单由 Dock 自己绘制（不
 - 右键：打开设置、外观 >、Dock 层级 >、退出；
 - 不含权限诊断、重新加载配置或配置目录入口；
 - 点击菜单外、点击任务栏或按 Esc 会关闭；
-- Explorer 重启后自动重新注册托盘图标。
+- 首次注册失败不会丢弃托盘对象，按 1、2、4、8、16、29 秒退避重试约 60 秒；
+- Explorer 重启后立即重新注册；重复 `--autostart` 也会请求已有 Dock 恢复托盘。重试超时后不保留周期计时器。
 
 Dock 同时启动一个隐藏的 `glide-dock.exe --guard` 守护进程：
 
@@ -397,7 +399,7 @@ cargo run -p glide-dock -- --render-preview preview
 - 自动隐藏与全局热键尚未接线（Dock 已支持双模式开机自启动）。
 - 多显示器切换只会在 `WM_DISPLAYCHANGE` 时重新排布，未记忆具体显示器。
 - Tauri 安装器依赖目标机的 Microsoft Edge WebView2 Runtime；未安装时安装向导无法显示。
-- Dock/Slint 分发为 .NET-free；仓库中的 `settings-app` 与 `setup-app` 源码保留，但不参与当前安装器构建。
+- Dock/Slint 分发为 .NET-free；旧版 WinUI 设置中心与 .NET 安装器已移除。
 - UWP/Store 应用请通过开始菜单快捷方式（`.lnk`）加入；直接加入其 WindowsApps
   `.exe` 可能无法激活包身份。
 - 运行状态由 `SetWinEventHook` 窗口事件驱动；启动等待由可见窗口确认或 12 s 超时
@@ -426,6 +428,6 @@ cargo run -p glide-dock -- --render-preview preview
 Glide-Dock 源代码：MIT OR Apache-2.0，见 [LICENSE-MIT](LICENSE-MIT) 与
 [LICENSE-APACHE](LICENSE-APACHE)。
 
-安装器使用 Rust + Tauri，并依赖目标系统提供 Microsoft Edge WebView2 Runtime。Dock及其 Slint UI 不依赖 .NET；仓库中的 `settings-app` / `setup-app` 目录保留现有源代码，但不属于本安装器的构建与分发步骤。
+安装器使用 Rust + Tauri，并依赖目标系统提供 Microsoft Edge WebView2 Runtime。Dock及其 Slint UI 不依赖 .NET；旧版 WinUI 设置中心与 .NET 安装器已从仓库删除。
 
 > Glide-Dock 保留 Winstep Nexus 的效率理念，但与 Winstep 无关联，也未使用其代码或皮肤资源。

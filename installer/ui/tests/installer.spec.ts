@@ -7,7 +7,7 @@ import type { MockOptions } from './mock';
 async function open(page: Page, options: MockOptions = {}) {
   await page.addInitScript(setupMock, options);
   await page.goto('/');
-  await expect(page.locator('#version')).toHaveText('v0.4.4');
+  await expect(page.locator('#version')).toHaveText('v0.4.5');
 }
 async function preferences(page: Page) {
   await expect(page.locator('#primary-button')).toBeEnabled();

@@ -5,6 +5,7 @@
 
 > **文档版本 2.5 · 2026-11-14**
 > 当前交付：**v0.4.0（M1 + M2 完成，M3 部分完成，M4 设置中心与五层动效系统已落地）**
+> **当前方案**：设置中心使用 Dock 进程内 Slint UI；旧版 WinUI 3 `settings-app` 与 .NET `setup-app` 已删除，本文相关 WinUI 描述仅作历史记录。
 > 代码、预览图与验收记录见仓库根目录、[`preview/`](../preview/) 与
 > [PLAN.md](PLAN.md)。
 
@@ -56,7 +57,7 @@ Glide-Dock 是一个常驻桌面的应用启动栏，用 Rust 与原生 Win32 �
 | 主题 | 深色 / 浅色 / 跟随系统，注册表读取系统偏好 | ✅ 已实现 |
 | 毛玻璃背景 | Windows.UI.Composition HostBackdropBrush 实时模糊 + composition 圆角；不截屏，不可用时半透明渐变；可用 `appearance.frosted_glass` 关闭 | ✅ 已实现 |
 | DPI / 工作区 | Per-Monitor V2，`rcWork` 避让任务栏，`WM_DPICHANGED` 重排 | ✅ 已实现 |
-| 单实例 | 命名互斥体；第二次启动自动退出 | ✅ 已实现 |
+| 单实例 | 命名互斥体；第二次启动自动退出，`--autostart` 可请求已有实例恢复托盘 | ✅ 已实现 |
 | 运行状态 | 图标底部圆点；`SetWinEventHook` 事件驱动，启动/悬停/窗口事件时刷新 | ✅ 已实现 |
 | 应用启动 | EXE `CreateProcessW`；LNK/文件/文件夹/URL `ShellExecuteExW`；商店应用 AAM；统一 LauncherService | ✅ 已实现 |
 | 商店应用 | 右键“添加商店应用...”按需扫描 Start AppsFolder，AUMID 持久化与图标提取 | ✅ 已实现 |
@@ -64,8 +65,8 @@ Glide-Dock 是一个常驻桌面的应用启动栏，用 Rust 与原生 Win32 �
 | Dock 层级 | 桌面同级 / 动态层级 / 始终置顶，设置中心可切换 | ✅ 已实现 |
 | 自动隐藏 | 延迟隐藏、贴边唤出 | ⬜ 未接线 |
 | 多显示器 | 记忆具体显示器、拔插回退 | 🟡 仅 `WM_DISPLAYCHANGE` 重排 |
-| 开机启动 | 双模式：快速计划任务 / 兼容 HKCU Run，行为页可展开选择 | ✅ 已实现 |
-| 系统托盘 | 品牌图标、设置/外观/Dock 层级/提示/退出；Explorer 重启自动恢复 | ✅ 已实现 |
+| 开机启动 | 双模式：快速计划任务仅当前用户 SID、交互式令牌、最低权限；兼容 HKCU Run | ✅ 已实现 |
+| 系统托盘 | 品牌图标、自绘菜单；首次失败限时重试，Explorer 重启或重复自启动均可恢复 | ✅ 已实现 |
 | 守护进程 | 隐藏 `--guard` 进程，异常退出自动重启，正常退出不重启 | ✅ 已实现 |
 | 权限诊断 | 检测管理员 / Low Integrity，提示 UIPI 拖放限制 | ✅ 已实现 |
 | 全局热键 | `RegisterHotKey` | ⬜ 未实现 |

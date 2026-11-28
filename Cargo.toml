@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "app",
+    "settings-ui",
     "installer",
     "uninstaller",
     "crates/dock-core",
@@ -11,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.4"
+version = "0.4.5"
 edition = "2024"
 rust-version = "1.95"
 authors = ["Glide-Dock contributors"]
@@ -31,6 +32,7 @@ windows = { version = "0.62.2", features = [    "Win32_Foundation",
     "Win32_System_WinRT",
     "Win32_System_WinRT_Composition",
     "Win32_Graphics_Dwm",
+    "Win32_Graphics_DirectWrite",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Accessibility",
@@ -71,8 +73,19 @@ slint-build = "=1.19.0"
 
 [profile.release]
 lto = "thin"
-codegen-units = 1
+codegen-units = 16
 strip = true
+
+[profile.ci]
+inherits = "test"
+opt-level = 0
+debug = 0
+
+[profile.ci.package."*"]
+opt-level = 0
+
+[profile.ci.build-override]
+opt-level = 0
 
 [profile.dev.package."*"]
 opt-level = 2

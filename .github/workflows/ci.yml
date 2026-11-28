@@ -2,16 +2,22 @@ name: CI
 
 on:
   push:
+    branches: ["main"]
     tags: ["v*"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
-  CARGO_PROFILE_DEV_DEBUG: "0"
-  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
   frontend:
@@ -38,27 +44,6 @@ jobs:
           retention-days: 1
           compression-level: 0
 
-  lint:
-    needs: frontend
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-      - name: Download installer frontend
-        uses: actions/download-artifact@v8
-        with:
-          name: installer-ui-dist
-          path: target/installer-ui
-      - name: Format
-        run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
-
   test-ui:
     runs-on: ubuntu-latest
     steps:
@@ -79,48 +64,68 @@ jobs:
       - name: Test CNB publisher
         run: node --test scripts/tests/publish-cnb.test.mjs scripts/tests/mirror-github-release.test.mjs
 
-  test-rust:
+  rust-checks:
     needs: frontend
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Exclude workspace and Cargo home from Defender
+        shell: pwsh
+        run: |
+          try {
+            Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, $env:CARGO_HOME -ErrorAction Stop
+          } catch {
+            Write-Host "::notice::Skipping Defender exclusion: $_"
+          }
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust-check
       - name: Download installer frontend
         uses: actions/download-artifact@v8
         with:
           name: installer-ui-dist
           path: target/installer-ui
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --profile ci -- -D warnings
       - name: Test
         env:
           RUST_TEST_THREADS: 1
-        run: cargo test --locked --workspace
+        run: cargo test --locked --workspace --profile ci
 
   release:
-    needs: [lint, test-ui, test-rust]
+    needs: frontend
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+      - name: Exclude workspace and Cargo home from Defender
+        shell: pwsh
+        run: |
+          try {
+            Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, $env:CARGO_HOME -ErrorAction Stop
+          } catch {
+            Write-Host "::notice::Skipping Defender exclusion: $_"
+          }
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: false
-      - name: Install Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: installer/ui/package-lock.json
+          prefix-key: v1-release
       - name: Download installer frontend
         uses: actions/download-artifact@v8
         with:
           name: installer-ui-dist
           path: target/installer-ui
       - name: Verify release tag version
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         run: |
           $versionLine = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
@@ -129,8 +134,9 @@ jobs:
           if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Release tag $env:GITHUB_REF_NAME does not match workspace version v$version" }
       - name: Build standalone Tauri installer
         shell: pwsh
-        run: .\scripts\build-installer.ps1 -OutputDirectory "$env:GITHUB_WORKSPACE\dist\installer"
+        run: .\scripts\build-installer.ps1 -SkipFrontendBuild -OutputDirectory "$env:GITHUB_WORKSPACE\dist\installer"
       - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v7
         with:
           name: glide-dock-installer
@@ -142,7 +148,8 @@ jobs:
           compression-level: 0
 
   publish-github:
-    needs: release
+    needs: [rust-checks, test-ui, release]
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -164,7 +171,8 @@ jobs:
             release-assets/Glide-Dock-v*-Setup.exe.sha256
 
   publish-cnb:
-    needs: release
+    needs: [rust-checks, test-ui, release]
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -173,12 +181,18 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Synchronize source and start the CNB release pipeline
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Download installer
+        uses: actions/download-artifact@v8
+        with:
+          name: glide-dock-installer
+          path: release-assets
+      - name: Publish CNB Release
         env:
           CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
           CNB_REPOSITORY: ${{ vars.CNB_REPOSITORY || 'won114514/Glide-Dock' }}
-        run: |
-          git -c credential.helper= \
-            -c 'credential.helper=!f() { if test "$1" = get; then printf "%s\n" "username=cnb" "password=$CNB_TOKEN"; fi; }; f' \
-            push --atomic "https://cnb.cool/$CNB_REPOSITORY.git" \
-            "HEAD:refs/heads/main" "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: node scripts/publish-cnb.mjs --tag "$RELEASE_TAG" --assets release-assets --publication release

@@ -83,9 +83,9 @@ impl Metrics {
         };
 
         let shadow = 24.0 * scale;
-        // Reserve room above the dock for the context menu so both live in the
-        // same layered window. The menu is roughly 250 DIP tall at most.
-        let headroom = (extra + tooltip_reserve).max(250.0 * scale) + 8.0 * scale;
+        // Reserve room above the dock only for magnification overhang and hover
+        // tooltips; the live context menu now renders in its own popup window.
+        let headroom = extra + tooltip_reserve + 8.0 * scale;
         // The magnified row can grow by roughly `extra * influence` in total.
         // Split that budget across both sides so high factors/ranges do not
         // push icons outside the layered window.

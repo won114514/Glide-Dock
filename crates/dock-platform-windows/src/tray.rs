@@ -8,7 +8,7 @@ use std::mem::size_of;
 
 use dock_core::models::DockLayer;
 use dock_core::theme::ThemeMode;
-use windows::Win32::Foundation::{HWND, LPARAM, POINT};
+use windows::Win32::Foundation::{GetLastError, HWND, LPARAM, POINT};
 use windows::Win32::UI::Shell::{
     ExtractIconExW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIIF_WARNING, NIM_ADD,
     NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
@@ -83,8 +83,9 @@ pub struct TrayIcon {
 }
 
 impl TrayIcon {
-    /// Adds the brand icon to the notification area.
-    pub fn install(hwnd: HWND) -> Result<Self> {
+    /// Creates the tray owner and makes a best-effort initial registration.
+    #[must_use]
+    pub fn install(hwnd: HWND) -> Self {
         let (icon, owns_icon) = icon_for_current_exe();
         let mut data = NOTIFYICONDATAW {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,
@@ -104,8 +105,24 @@ impl TrayIcon {
             taskbar_created,
             installed: false,
         };
-        tray.add()?;
-        Ok(tray)
+        if let Err(error) = tray.ensure_installed() {
+            tracing::warn!(%error, "initial notification-area registration failed");
+        }
+        tray
+    }
+
+    /// Whether Shell currently acknowledges this icon registration.
+    #[must_use]
+    pub fn is_installed(&self) -> bool {
+        self.installed
+    }
+
+    /// Registers the icon if an earlier attempt failed.
+    pub fn ensure_installed(&mut self) -> Result<()> {
+        if self.installed {
+            return Ok(());
+        }
+        self.add()
     }
 
     /// Removes the icon from the notification area.
@@ -134,17 +151,7 @@ impl TrayIcon {
     /// Interprets a tray callback or Explorer-restart message.
     #[must_use]
     pub fn handle_message(&self, msg: u32, lparam: LPARAM) -> Option<TrayEvent> {
-        if self.taskbar_created != 0 && msg == self.taskbar_created {
-            return Some(TrayEvent::ReAdd);
-        }
-        if msg != WM_APP_TRAY {
-            return None;
-        }
-        match lparam.0 as u32 {
-            WM_LBUTTONUP | WM_LBUTTONDBLCLK => Some(TrayEvent::OpenSettings),
-            WM_RBUTTONUP => Some(TrayEvent::ShowMenu),
-            _ => None,
-        }
+        tray_event_for_message(self.taskbar_created, msg, lparam)
     }
 
     /// Shows the native context menu and returns the selected command.
@@ -260,12 +267,29 @@ impl TrayIcon {
 
     fn add(&mut self) -> Result<()> {
         if !unsafe { Shell_NotifyIconW(NIM_ADD, &self.data) }.as_bool() {
-            return Err(PlatformError::Shell(
-                "Shell_NotifyIconW(NIM_ADD) failed".to_string(),
-            ));
+            let code = unsafe { GetLastError() }.0;
+            tracing::warn!(code, "Shell_NotifyIconW(NIM_ADD) failed");
+            return Err(PlatformError::Shell(format!(
+                "Shell_NotifyIconW(NIM_ADD) failed (Win32 error {code})"
+            )));
         }
         self.installed = true;
+        tracing::info!("notification-area icon registered");
         Ok(())
+    }
+}
+
+fn tray_event_for_message(taskbar_created: u32, msg: u32, lparam: LPARAM) -> Option<TrayEvent> {
+    if taskbar_created != 0 && msg == taskbar_created {
+        return Some(TrayEvent::ReAdd);
+    }
+    if msg != WM_APP_TRAY {
+        return None;
+    }
+    match lparam.0 as u32 {
+        WM_LBUTTONUP | WM_LBUTTONDBLCLK => Some(TrayEvent::OpenSettings),
+        WM_RBUTTONUP => Some(TrayEvent::ShowMenu),
+        _ => None,
     }
 }
 
@@ -333,4 +357,31 @@ fn copy_utf16(buffer: &mut [u16], text: &str) {
     let encoded: Vec<u16> = text.encode_utf16().take(buffer.len() - 1).collect();
     buffer.fill(0);
     buffer[..encoded.len()].copy_from_slice(&encoded);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_taskbar_created_even_when_no_icon_was_installed() {
+        assert_eq!(
+            tray_event_for_message(0xB123, 0xB123, LPARAM(0)),
+            Some(TrayEvent::ReAdd)
+        );
+        assert_eq!(tray_event_for_message(0, 0xB123, LPARAM(0)), None);
+    }
+
+    #[test]
+    fn maps_tray_clicks_and_ignores_other_messages() {
+        assert_eq!(
+            tray_event_for_message(0xB123, WM_APP_TRAY, LPARAM(WM_LBUTTONUP as isize)),
+            Some(TrayEvent::OpenSettings)
+        );
+        assert_eq!(
+            tray_event_for_message(0xB123, WM_APP_TRAY, LPARAM(WM_RBUTTONUP as isize)),
+            Some(TrayEvent::ShowMenu)
+        );
+        assert_eq!(tray_event_for_message(0xB123, WM_NULL, LPARAM(0)), None);
+    }
 }

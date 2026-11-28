@@ -1,22 +1,22 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::thread::{self, JoinHandle};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use dock_core::layout::Metrics;
-use dock_core::models::{
-    Appearance, Behavior, DockConfig, DockLayer, HoverPreset, LaunchPreset, MonitorConfig,
-    MotionConfig,
+use dock_core::models::{Appearance, Behavior, MonitorConfig, MotionConfig};
+use dock_core::settings_ipc::{
+    COPYDATA_UI_MAGIC, DockToUiEvent, NoticeKind, NoticeUpdate, SettingsCommand, SettingsUpdate,
+    SettingsUpdateView, SettingsValues, StartupChoice, UiBootstrap, UiLaunchMode,
 };
-use dock_core::theme::{AccentColor, ThemeMode};
 use dock_platform_windows::{
-    ComGuard, SingleInstance, SingleInstanceOutcome, is_elevated, is_low_integrity,
-    metrics_for_window, open_path, prefers_light_theme,
+    SingleInstance, SingleInstanceOutcome, is_elevated, is_low_integrity, is_window, open_path,
+    prefers_light_theme,
     registry::Key,
+    send_copydata,
     startup::{self, StartupMode, StartupState},
 };
-use slint::winit_030::WinitWindowAccessor;
-use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
 };
@@ -25,566 +25,284 @@ use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetShellWindow, GetWindowThreadProcessId, PostMessageW,
-};
+use windows::Win32::UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId};
 
-use super::{DockApp, WM_APP_SETTINGS_COMMAND, palette_for, resolve_theme};
-
-slint::include_modules!();
+use super::{DockApp, palette_for, resolve_theme};
 
 const GUARD_MUTEX_NAME: &str = r"Local\Glide-Dock.Guard";
 const UAC_REGISTRY_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System";
 const APP_COMPAT_REGISTRY_KEY: &str =
     r"Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers";
 
-#[derive(Debug, Clone, Default, PartialEq)]
-pub(super) struct SettingsValues {
-    pub appearance: Appearance,
-    pub behavior: Behavior,
-    pub motion: MotionConfig,
-    pub monitor: MonitorConfig,
-}
-
-impl SettingsValues {
-    pub(super) fn from_config(config: &DockConfig) -> Self {
-        Self {
-            appearance: config.appearance.clone(),
-            behavior: config.behavior.clone(),
-            motion: config.motion.clone(),
-            monitor: config.monitor.clone(),
-        }
-    }
-
-    fn normalize(&mut self) {
-        self.appearance.normalize();
-        self.behavior.normalize();
-        self.motion.normalize();
-        self.monitor.normalize();
-    }
-}
-
-pub(super) enum SettingsCommand {
-    Apply(SettingsValues),
-    OpenConfigDirectory,
-    OpenLogDirectory,
-    Reset,
-    Reload,
-    SetStartup { enabled: bool, mode: StartupMode },
-    SetStartupMode(StartupMode),
-    SetFont(String),
-    RefreshDiagnostics,
-    CopyDiagnostics,
-    CopyMotionConfig,
-    CheckForUpdates,
-    InstallUpdate,
-    OpenCnbReleases,
-    OpenGithubReleases,
-    LaunchFailed(String),
-}
-
-#[derive(Default)]
-pub(super) struct SettingsUpdate {
-    status: Option<String>,
-    diagnostics: Option<String>,
-    values: Option<SettingsValues>,
-    startup: Option<(bool, StartupMode)>,
-    font_id: Option<String>,
-    system_dark: Option<bool>,
-    update_view: Option<crate::update::UpdateSnapshot>,
-    show: bool,
-}
-
 #[derive(Default)]
 pub(super) struct SettingsHost {
-    ui: Option<SettingsUi>,
-}
-
-struct SettingsUi {
-    thread: JoinHandle<()>,
-    commands: Receiver<SettingsCommand>,
-    dispatch: Arc<Mutex<SettingsDispatch>>,
-    values: Arc<Mutex<SettingsValues>>,
-}
-
-#[derive(Default)]
-struct SettingsDispatch {
-    window: Option<slint::Weak<SettingsWindow>>,
-    pending: Vec<SettingsUpdate>,
-    stopping: bool,
+    child: Option<Child>,
+    ui_hwnd: Option<HWND>,
+    pending_events: Vec<DockToUiEvent>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum SettingsLaunchError {
     #[error("无法启动设置窗口：{0}")]
     Spawn(#[from] std::io::Error),
-    #[error("设置窗口已停止，请重新启动 Glide-Dock")]
-    ThreadExited,
+    #[error("找不到独立设置程序：{}", .0.display())]
+    MissingHelper(PathBuf),
 }
 
-impl SettingsUi {
-    fn post(&self, update: SettingsUpdate) -> Result<(), SettingsLaunchError> {
-        if self.thread.is_finished() {
-            return Err(SettingsLaunchError::ThreadExited);
-        }
-        if let Some(values) = update.values.as_ref() {
-            *self.values.lock().unwrap() = values.clone();
-        }
-        let mut dispatch = self.dispatch.lock().unwrap();
-        if let Some(window) = dispatch.window.as_ref() {
-            window
-                .upgrade_in_event_loop(move |window| apply_update(&window, update))
-                .map_err(|_| SettingsLaunchError::ThreadExited)
-        } else {
-            dispatch.pending.push(update);
-            Ok(())
-        }
+fn startup_choice(mode: StartupMode) -> StartupChoice {
+    match mode {
+        StartupMode::Task => StartupChoice::Task,
+        StartupMode::Run => StartupChoice::Run,
+    }
+}
+
+fn startup_mode_from(choice: StartupChoice) -> StartupMode {
+    match choice {
+        StartupChoice::Task => StartupMode::Task,
+        StartupChoice::Run => StartupMode::Run,
+    }
+}
+
+pub(super) fn update_view_from_snapshot(
+    snapshot: &crate::update::UpdateSnapshot,
+) -> SettingsUpdateView {
+    SettingsUpdateView {
+        managed: snapshot.managed,
+        checking: snapshot.checking,
+        downloading: snapshot.downloading,
+        ready: snapshot.ready,
+        launching: snapshot.launching,
+        progress: snapshot.progress,
+        status: snapshot.status.clone(),
+        current_version: snapshot.current_version.clone(),
+        latest_version: snapshot.latest_version.clone(),
+        release_notes: snapshot.release_notes.clone(),
+        source: snapshot.source.clone(),
+        cnb_status: snapshot.cnb_status.clone(),
+        github_status: snapshot.github_status.clone(),
+        last_check_text: snapshot.last_check_text.clone(),
     }
 }
 
 impl SettingsHost {
+    fn poll_child(&mut self) {
+        let exited = match self.child.as_mut() {
+            Some(child) => !matches!(child.try_wait(), Ok(None)),
+            None => false,
+        };
+        if exited {
+            self.child = None;
+            self.ui_hwnd = None;
+            self.pending_events.clear();
+        }
+    }
+
+    fn send_event(&mut self, event: DockToUiEvent) -> bool {
+        self.poll_child();
+        if self.child.is_none() {
+            return false;
+        }
+        if let Some(hwnd) = self.ui_hwnd {
+            if !is_window(hwnd) {
+                self.ui_hwnd = None;
+                self.child = None;
+                self.pending_events.clear();
+                return false;
+            }
+            if let Ok(payload) = serde_json::to_vec(&event) {
+                if send_copydata(hwnd, COPYDATA_UI_MAGIC, &payload).is_ok() {
+                    return true;
+                }
+                self.ui_hwnd = None;
+                self.child = None;
+                self.pending_events.clear();
+                return false;
+            }
+        }
+        self.pending_events.push(event);
+        true
+    }
+
+    fn spawn_helper(
+        &mut self,
+        owner: HWND,
+        mode: UiLaunchMode,
+        values: SettingsValues,
+        config_path: &Path,
+        update_snapshot: &crate::update::UpdateSnapshot,
+    ) -> Result<(), SettingsLaunchError> {
+        let helper = std::env::current_exe()?.with_file_name("glide-settings.exe");
+        if !helper.is_file() {
+            return Err(SettingsLaunchError::MissingHelper(helper));
+        }
+        let config_directory = config_path.parent().unwrap_or_else(|| Path::new("."));
+        let startup_state = startup::query(config_directory).unwrap_or_else(|error| {
+            tracing::warn!(%error, "could not read startup registrations");
+            StartupState {
+                enabled: false,
+                preferred: StartupMode::Task,
+                executable: None,
+            }
+        });
+        let boot = UiBootstrap {
+            mode,
+            dock_hwnd: owner.0 as isize,
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            font_id: read_font_preference(config_directory),
+            values,
+            startup_enabled: startup_state.enabled,
+            startup_mode: startup_choice(startup_state.preferred),
+            system_dark: !prefers_light_theme(),
+            update_view: update_view_from_snapshot(update_snapshot),
+        };
+        let payload = serde_json::to_vec(&boot).map_err(std::io::Error::other)?;
+        let mut child = Command::new(&helper)
+            .arg("--dock-hwnd")
+            .arg((owner.0 as isize).to_string())
+            .stdin(Stdio::piped())
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(&payload)?;
+        }
+        self.child = Some(child);
+        self.ui_hwnd = None;
+        self.pending_events.clear();
+        Ok(())
+    }
+
+    pub(super) fn register_ui_window(&mut self, ui_hwnd: HWND) {
+        self.poll_child();
+        if self.child.is_none() || !is_window(ui_hwnd) {
+            return;
+        }
+        self.ui_hwnd = Some(ui_hwnd);
+        let queued = std::mem::take(&mut self.pending_events);
+        for event in queued {
+            if let Ok(payload) = serde_json::to_vec(&event) {
+                let _ = send_copydata(ui_hwnd, COPYDATA_UI_MAGIC, &payload);
+            }
+        }
+    }
+
     pub(super) fn open(
         &mut self,
         owner: HWND,
         values: SettingsValues,
         config_path: &Path,
+        update_snapshot: &crate::update::UpdateSnapshot,
     ) -> Result<(), SettingsLaunchError> {
-        if let Some(ui) = self.ui.as_ref() {
-            return ui.post(SettingsUpdate {
-                values: Some(values),
-                show: true,
-                ..Default::default()
-            });
+        let update = SettingsUpdate {
+            values: Some(values.clone()),
+            update_view: Some(update_view_from_snapshot(update_snapshot)),
+            show: true,
+            ..Default::default()
+        };
+        if self.send_event(DockToUiEvent::UpdateSettings(Box::new(update))) {
+            return Ok(());
         }
-
-        let (commands_tx, commands_rx) = mpsc::channel();
-        let dispatch = Arc::new(Mutex::new(SettingsDispatch::default()));
-        let ui_dispatch = Arc::clone(&dispatch);
-        let ui_values = Arc::new(Mutex::new(values.clone()));
-        let callback_values = Arc::clone(&ui_values);
-        let config_directory = config_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-        let window_owner = owner.0 as isize;
-        let thread = thread::Builder::new()
-            .name("glide-settings-ui".to_string())
-            .spawn(move || {
-                if let Err(error) = run_settings_window(
-                    window_owner,
-                    values,
-                    config_directory,
-                    &commands_tx,
-                    &ui_dispatch,
-                    callback_values,
-                ) {
-                    tracing::error!(%error, "settings UI failed");
-                    notify_dock(
-                        window_owner,
-                        &commands_tx,
-                        SettingsCommand::LaunchFailed(error.to_string()),
-                    );
-                }
-            })?;
-        self.ui = Some(SettingsUi {
-            thread,
-            commands: commands_rx,
-            dispatch,
-            values: ui_values,
-        });
-        Ok(())
+        self.spawn_helper(
+            owner,
+            UiLaunchMode::Settings,
+            values,
+            config_path,
+            update_snapshot,
+        )
     }
 
-    pub(super) fn drain(&self) -> Vec<SettingsCommand> {
-        self.ui
-            .as_ref()
-            .map(|ui| ui.commands.try_iter().collect())
-            .unwrap_or_default()
+    pub(super) fn open_notice(
+        &mut self,
+        owner: HWND,
+        kind: NoticeKind,
+        values: SettingsValues,
+        config_path: &Path,
+        update_snapshot: &crate::update::UpdateSnapshot,
+    ) -> Result<(), SettingsLaunchError> {
+        let update = NoticeUpdate {
+            kind: Some(kind),
+            theme: Some(values.appearance.theme),
+            system_dark: Some(!prefers_light_theme()),
+            feedback: Some(String::new()),
+            show: true,
+        };
+        if self.send_event(DockToUiEvent::UpdateNotice(update)) {
+            return Ok(());
+        }
+        self.spawn_helper(
+            owner,
+            UiLaunchMode::Notice(kind),
+            values,
+            config_path,
+            update_snapshot,
+        )
     }
 
     pub(super) fn shutdown(&mut self) {
-        let Some(ui) = self.ui.take() else {
-            return;
-        };
-        let window = {
-            let mut dispatch = ui.dispatch.lock().unwrap();
-            dispatch.stopping = true;
-            dispatch.window.take()
-        };
-        if let Some(window) = window {
-            let _ = window.upgrade_in_event_loop(|window| {
-                if let Err(error) = window.hide() {
-                    tracing::debug!(%error, "settings window was already hidden during shutdown");
+        if let Some(hwnd) = self.ui_hwnd.take()
+            && is_window(hwnd)
+            && let Ok(payload) = serde_json::to_vec(&DockToUiEvent::CloseUi)
+        {
+            let _ = send_copydata(hwnd, COPYDATA_UI_MAGIC, &payload);
+        }
+        self.pending_events.clear();
+        if let Some(mut child) = self.child.take() {
+            let deadline = Instant::now() + Duration::from_millis(400);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return;
+                    }
                 }
-                let _ = slint::quit_event_loop();
+            }
+        }
+    }
+
+    pub(super) fn sync_system_theme(&mut self) {
+        self.poll_child();
+        if self.child.is_none() {
+            return;
+        }
+        let dark = !prefers_light_theme();
+        self.update(SettingsUpdate {
+            system_dark: Some(dark),
+            ..Default::default()
+        });
+        let _ = self.send_event(DockToUiEvent::UpdateNotice(NoticeUpdate {
+            system_dark: Some(dark),
+            ..Default::default()
+        }));
+    }
+
+    pub(super) fn update(&mut self, update: SettingsUpdate) {
+        self.poll_child();
+        if self.child.is_some() {
+            let _ = self.send_event(DockToUiEvent::UpdateSettings(Box::new(update)));
+        }
+    }
+
+    fn update_notice_feedback(&mut self, feedback: impl Into<String>) {
+        self.poll_child();
+        if self.child.is_some() {
+            let _ = self.send_event(DockToUiEvent::UpdateNotice(NoticeUpdate {
+                feedback: Some(feedback.into()),
+                ..Default::default()
+            }));
+        }
+    }
+
+    pub(super) fn update_update_view(&mut self, snapshot: &crate::update::UpdateSnapshot) {
+        self.poll_child();
+        if self.child.is_some() {
+            self.update(SettingsUpdate {
+                update_view: Some(update_view_from_snapshot(snapshot)),
+                ..Default::default()
             });
         }
-        if let Err(payload) = ui.thread.join() {
-            tracing::warn!(?payload, "settings UI thread exited with a panic");
-        }
-    }
-
-    pub(super) fn sync_system_theme(&self) {
-        self.update(SettingsUpdate {
-            system_dark: Some(!prefers_light_theme()),
-            ..Default::default()
-        });
-    }
-
-    pub(super) fn update(&self, update: SettingsUpdate) {
-        if let Some(ui) = self.ui.as_ref()
-            && let Err(error) = ui.post(update)
-        {
-            tracing::debug!(%error, "could not update settings window");
-        }
-    }
-
-    pub(super) fn update_update_view(&self, snapshot: crate::update::UpdateSnapshot) {
-        self.update(SettingsUpdate {
-            update_view: Some(snapshot),
-            ..Default::default()
-        });
-    }
-}
-
-fn run_settings_window(
-    owner: isize,
-    initial: SettingsValues,
-    config_directory: PathBuf,
-    commands: &Sender<SettingsCommand>,
-    dispatch: &Mutex<SettingsDispatch>,
-    latest_values: Arc<Mutex<SettingsValues>>,
-) -> Result<(), slint::PlatformError> {
-    let _com = ComGuard::sta();
-    let startup_state = startup::query(&config_directory).unwrap_or_else(|error| {
-        tracing::warn!(%error, "could not read startup registrations");
-        StartupState {
-            enabled: false,
-            preferred: StartupMode::Task,
-            executable: None,
-        }
-    });
-    let font_id = register_settings_font(&read_font_preference(&config_directory));
-    let window = SettingsWindow::new()?;
-    populate_window(&window, &initial, &startup_state, &font_id);
-    // Size in logical pixels, then center inside the owner's monitor work area.
-    // Fixed 980x720 DIP windows otherwise extend behind the taskbar at high DPI.
-    let monitor = metrics_for_window(HWND(owner as *mut _));
-    let available_width = (monitor.work.width() as f32 / monitor.dpi_scale - 32.0).max(1.0);
-    let available_height = (monitor.work.height() as f32 / monitor.dpi_scale - 32.0).max(1.0);
-    window.set_available_width(available_width);
-    window.set_available_height(available_height);
-    let size = slint::LogicalSize::new(
-        980.0_f32.min(available_width),
-        720.0_f32.min(available_height),
-    );
-    window.window().set_size(size);
-    window.window().set_position(slint::PhysicalPosition::new(
-        monitor.work.left
-            + ((monitor.work.width() as f32 - size.width * monitor.dpi_scale) / 2.0) as i32,
-        monitor.work.top
-            + ((monitor.work.height() as f32 - size.height * monitor.dpi_scale) / 2.0) as i32,
-    ));
-    window
-        .window()
-        .on_close_requested(|| slint::CloseRequestResponse::HideWindow);
-
-    let weak = window.as_weak();
-    let changes_weak = weak.clone();
-    let changes = commands.clone();
-    let callback_values = latest_values;
-    window.on_settings_changed(move || {
-        let Some(window) = changes_weak.upgrade() else {
-            return;
-        };
-        let values = {
-            let mut latest = callback_values.lock().unwrap();
-            let values = values_from_window(&window, &latest);
-            *latest = values.clone();
-            values
-        };
-        notify_dock(owner, &changes, SettingsCommand::Apply(values));
-    });
-
-    let actions = commands.clone();
-    let controls = weak.clone();
-    window.on_action(move |action| {
-        match action.as_str() {
-            "window-minimize" => {
-                if let Some(window) = controls.upgrade() {
-                    window
-                        .window()
-                        .with_winit_window(|native| native.set_minimized(true));
-                }
-                return;
-            }
-            "window-toggle-maximize" => {
-                if let Some(window) = controls.upgrade() {
-                    window.window().with_winit_window(|native| {
-                        native.set_maximized(!native.is_maximized());
-                    });
-                }
-                return;
-            }
-            "window-close" => {
-                if let Some(window) = controls.upgrade()
-                    && let Err(error) = window.hide()
-                {
-                    tracing::debug!(%error, "could not hide the settings window");
-                }
-                return;
-            }
-            _ => {}
-        }
-        let command = match action.as_str() {
-            "open-config" => SettingsCommand::OpenConfigDirectory,
-            "open-logs" => SettingsCommand::OpenLogDirectory,
-            "reset" => SettingsCommand::Reset,
-            "reload" => SettingsCommand::Reload,
-            "startup-enable" => SettingsCommand::SetStartup {
-                enabled: true,
-                mode: startup_mode(&weak),
-            },
-            "startup-disable" => SettingsCommand::SetStartup {
-                enabled: false,
-                mode: startup_mode(&weak),
-            },
-            "startup-update" => SettingsCommand::SetStartup {
-                enabled: true,
-                mode: startup_mode(&weak),
-            },
-            "startup-mode" => SettingsCommand::SetStartupMode(startup_mode(&weak)),
-            "font-changed" => {
-                let font_id = weak
-                    .upgrade()
-                    .map(|window| window.get_font_id().to_string())
-                    .unwrap_or_else(|| "system".into());
-                SettingsCommand::SetFont(font_id)
-            }
-            "refresh-diagnostics" => SettingsCommand::RefreshDiagnostics,
-            "copy-diagnostics" => SettingsCommand::CopyDiagnostics,
-            "copy-motion" => SettingsCommand::CopyMotionConfig,
-            "check-updates" => SettingsCommand::CheckForUpdates,
-            "install-update" => SettingsCommand::InstallUpdate,
-            "open-cnb-releases" => SettingsCommand::OpenCnbReleases,
-            "open-github-releases" => SettingsCommand::OpenGithubReleases,
-            _ => return,
-        };
-        notify_dock(owner, &actions, command);
-    });
-
-    let pending = {
-        let mut dispatch = dispatch.lock().unwrap();
-        if dispatch.stopping {
-            return Ok(());
-        }
-        dispatch.window = Some(window.as_weak());
-        std::mem::take(&mut dispatch.pending)
-    };
-    for mut update in pending {
-        update.show = false;
-        apply_update(&window, update);
-    }
-    window.show()?;
-    // Slint owns its platform on this thread for the life of the Dock.
-    slint::run_event_loop_until_quit()
-}
-
-fn notify_dock(owner: isize, commands: &Sender<SettingsCommand>, command: SettingsCommand) {
-    if commands.send(command).is_ok() {
-        unsafe {
-            let _ = PostMessageW(
-                Some(HWND(owner as *mut _)),
-                WM_APP_SETTINGS_COMMAND,
-                WPARAM(0),
-                LPARAM(0),
-            );
-        }
-    }
-}
-
-fn apply_update(window: &SettingsWindow, update: SettingsUpdate) {
-    if let Some(dark) = update.system_dark {
-        window.set_system_dark(dark);
-    }
-    if let Some(status) = update.status {
-        window.set_status_message(status.into());
-    }
-    if let Some(diagnostics) = update.diagnostics {
-        window.set_diagnostics(diagnostics.into());
-    }
-    if let Some((enabled, mode)) = update.startup {
-        window.set_startup_enabled(enabled);
-        window.set_startup_mode(startup_mode_id(mode).into());
-    }
-    if let Some(font_id) = update.font_id {
-        window.set_font_id(font_id.into());
-    }
-    if let Some(update_view) = update.update_view {
-        apply_update_view(window, &update_view);
-    }
-    let visible = window.window().is_visible();
-    if let Some(values) = update.values {
-        populate_values(window, &values);
-    }
-    if update.show {
-        if !visible && let Err(error) = window.show() {
-            tracing::error!(%error, "could not show the settings window");
-            return;
-        }
-        window.window().with_winit_window(|native| {
-            if native.is_minimized() == Some(true) {
-                native.set_minimized(false);
-            }
-            native.focus_window();
-        });
-    }
-}
-
-fn apply_update_view(window: &SettingsWindow, update: &crate::update::UpdateSnapshot) {
-    window.set_update_managed(update.managed);
-    window.set_update_checking(update.checking);
-    window.set_update_downloading(update.downloading);
-    window.set_update_ready(update.ready);
-    window.set_update_launching(update.launching);
-    window.set_update_progress(update.progress as f32 / 100.0);
-    window.set_update_message(update.status.clone().into());
-    window.set_update_version(update.latest_version.clone().into());
-    window.set_update_source(update.source.clone().into());
-    window.set_update_cnb_status(update.cnb_status.clone().into());
-    window.set_update_github_status(update.github_status.clone().into());
-    window.set_update_last_check(update.last_check_text.clone().into());
-    window.set_update_notes(update.release_notes.clone().into());
-}
-
-fn populate_window(
-    window: &SettingsWindow,
-    values: &SettingsValues,
-    startup: &StartupState,
-    font_id: &str,
-) {
-    window.set_app_version(env!("CARGO_PKG_VERSION").into());
-    populate_values(window, values);
-    window.set_startup_enabled(startup.enabled);
-    window.set_startup_mode(startup_mode_id(startup.preferred).into());
-    window.set_font_id(font_id.into());
-    window.set_status_message("设置已连接到 Glide-Dock 主程序。".into());
-    window.set_diagnostics("选择“刷新诊断”以查看运行信息。".into());
-}
-
-fn populate_values(window: &SettingsWindow, values: &SettingsValues) {
-    let appearance = &values.appearance;
-    let behavior = &values.behavior;
-    let motion = &values.motion;
-    window.set_system_dark(!prefers_light_theme());
-    window.set_theme(theme_id(appearance.theme).into());
-    window.set_accent(accent_id(appearance.accent).into());
-    window.set_layer(layer_id(appearance.layer).into());
-    window.set_icon_size(appearance.icon_size);
-    window.set_spacing(appearance.spacing);
-    window.set_dock_padding(appearance.padding);
-    window.set_corner_radius(appearance.corner_radius);
-    window.set_dock_opacity(appearance.opacity * 100.0);
-    window.set_frosted_glass(appearance.frosted_glass);
-    window.set_gpu_acceleration(appearance.gpu_acceleration);
-    window.set_edge_margin(appearance.edge_margin);
-    window.set_monitor_offset(values.monitor.offset);
-    window.set_magnification(behavior.magnification);
-    window.set_launch_animation(behavior.launch_animation);
-    window.set_show_tooltips(behavior.show_tooltips);
-    window.set_show_running_indicator(behavior.show_running_indicator);
-    window.set_motion_enabled(motion.enabled);
-    window.set_respect_reduced_motion(motion.respect_reduced_motion);
-    window.set_hover_preset(motion.hover_preset.id().into());
-    window.set_launch_preset(motion.launch_preset.id().into());
-    window.set_max_scale(motion.max_scale);
-    window.set_range_slots(motion.range_slots);
-    window.set_hover_ms(motion.hover_ms as i32);
-    window.set_elasticity(motion.elasticity * 100.0);
-}
-
-fn values_from_window(window: &SettingsWindow, previous: &SettingsValues) -> SettingsValues {
-    let mut values = previous.clone();
-    values.appearance.theme = match window.get_theme().as_str() {
-        "light" => ThemeMode::Light,
-        "dark" => ThemeMode::Dark,
-        _ => ThemeMode::System,
-    };
-    values.appearance.accent = match window.get_accent().as_str() {
-        "teal" => AccentColor::Teal,
-        "violet" => AccentColor::Violet,
-        "orange" => AccentColor::Orange,
-        "pink" => AccentColor::Pink,
-        _ => AccentColor::Blue,
-    };
-    values.appearance.layer = match window.get_layer().as_str() {
-        "dynamic" => DockLayer::Dynamic,
-        "topmost" => DockLayer::Topmost,
-        _ => DockLayer::Desktop,
-    };
-    values.appearance.icon_size = window.get_icon_size();
-    values.appearance.spacing = window.get_spacing();
-    values.appearance.padding = window.get_dock_padding();
-    values.appearance.corner_radius = window.get_corner_radius();
-    values.appearance.opacity = window.get_dock_opacity() / 100.0;
-    values.appearance.frosted_glass = window.get_frosted_glass();
-    values.appearance.gpu_acceleration = window.get_gpu_acceleration();
-    values.appearance.edge_margin = window.get_edge_margin();
-    values.behavior.magnification = window.get_magnification();
-    values.behavior.launch_animation = window.get_launch_animation();
-    values.behavior.show_tooltips = window.get_show_tooltips();
-    values.behavior.show_running_indicator = window.get_show_running_indicator();
-    values.motion.enabled = window.get_motion_enabled();
-    values.motion.respect_reduced_motion = window.get_respect_reduced_motion();
-    values.motion.hover_preset =
-        HoverPreset::from_id(window.get_hover_preset().as_str()).unwrap_or_default();
-    values.motion.launch_preset =
-        LaunchPreset::from_id(window.get_launch_preset().as_str()).unwrap_or_default();
-    values.motion.max_scale = window.get_max_scale();
-    values.motion.range_slots = window.get_range_slots();
-    values.motion.hover_ms = window.get_hover_ms().max(0) as u32;
-    values.motion.elasticity = window.get_elasticity() / 100.0;
-    values.monitor.offset = window.get_monitor_offset();
-    values.normalize();
-    values
-}
-
-fn theme_id(theme: ThemeMode) -> &'static str {
-    match theme {
-        ThemeMode::System => "system",
-        ThemeMode::Light => "light",
-        ThemeMode::Dark => "dark",
-    }
-}
-
-fn accent_id(accent: AccentColor) -> &'static str {
-    match accent {
-        AccentColor::Blue => "blue",
-        AccentColor::Teal => "teal",
-        AccentColor::Violet => "violet",
-        AccentColor::Orange => "orange",
-        AccentColor::Pink => "pink",
-    }
-}
-
-fn layer_id(layer: DockLayer) -> &'static str {
-    match layer {
-        DockLayer::Desktop => "desktop",
-        DockLayer::Dynamic => "dynamic",
-        DockLayer::Topmost => "topmost",
-    }
-}
-
-fn startup_mode(weak: &slint::Weak<SettingsWindow>) -> StartupMode {
-    weak.upgrade()
-        .map(|window| StartupMode::parse(&window.get_startup_mode()))
-        .unwrap_or(StartupMode::Task)
-}
-
-fn startup_mode_id(mode: StartupMode) -> &'static str {
-    match mode {
-        StartupMode::Task => "task",
-        StartupMode::Run => "run",
     }
 }
 
@@ -644,41 +362,6 @@ fn write_font_preference(directory: &Path, font_id: &str) -> std::io::Result<()>
             let _ = std::fs::remove_file(temporary);
             Err(error)
         }
-    }
-}
-
-fn register_settings_font(preferred: &str) -> String {
-    static FONT_REGISTERED: OnceLock<bool> = OnceLock::new();
-    let available = *FONT_REGISTERED.get_or_init(|| {
-        let executable_font = std::env::current_exe().ok()
-            .and_then(|path| path.parent().map(|parent| parent.join("assets/fonts/NotoSansSC-VF.ttf")));
-        let source_font = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(r"..\settings-app\Assets\Fonts\NotoSansSC-VF.ttf");
-        let path = executable_font.filter(|path| path.is_file()).unwrap_or(source_font);
-        let Ok(bytes) = std::fs::read(&path) else {
-            tracing::warn!(path = %path.display(), "bundled settings font is unavailable");
-            return false;
-        };
-        let mut collection = slint::fontique_012::fontique::Collection::new(
-            slint::fontique_012::fontique::CollectionOptions { shared: true, system_fonts: true },
-        );
-        let fonts = collection.register_fonts(
-            slint::fontique_012::fontique::Blob::new(std::sync::Arc::new(bytes)), None,
-        );
-        if fonts.is_empty() {
-            tracing::warn!(path = %path.display(), "bundled settings font contains no usable faces");
-            return false;
-        }
-        if let Err(error) = slint::fontique_012::set_shared_collection(collection) {
-            tracing::warn!(%error, "could not register the bundled settings font");
-            return false;
-        }
-        true
-    });
-    if preferred == "noto-sans-sc" && available {
-        "noto-sans-sc".into()
-    } else {
-        "system".into()
     }
 }
 
@@ -756,104 +439,154 @@ fn set_clipboard_text(owner: HWND, text: &str) -> std::io::Result<()> {
 }
 
 impl DockApp {
-    pub(super) fn on_settings_commands(&mut self) {
-        for command in self.settings.drain() {
-            match command {
-                SettingsCommand::Apply(values) => self.apply_settings(values),
-                SettingsCommand::OpenConfigDirectory => self.open_config_dir(),
-                SettingsCommand::OpenLogDirectory => {
-                    let directory = dock_storage::log_dir();
-                    if let Err(error) = std::fs::create_dir_all(&directory) {
-                        self.set_error(format!("无法创建日志目录：{error}"));
-                    } else if let Err(error) = open_path(&directory.to_string_lossy()) {
-                        self.set_error(format!("无法打开日志目录：{error}"));
-                    }
-                }
-                SettingsCommand::Reset => {
-                    let mut values = SettingsValues::from_config(&self.config);
-                    values.appearance = Appearance::default();
-                    values.behavior = Behavior::default();
-                    values.motion = MotionConfig::default();
-                    values.monitor = MonitorConfig::default();
-                    self.apply_settings(values);
-                    self.settings.update(SettingsUpdate {
-                        values: Some(SettingsValues::from_config(&self.config)),
-                        ..Default::default()
-                    });
-                }
-                SettingsCommand::Reload => {
-                    if self.reload_config() {
-                        self.settings.update(SettingsUpdate {
-                            values: Some(SettingsValues::from_config(&self.config)),
-                            status: Some("配置已重新加载。".into()),
-                            ..Default::default()
-                        });
-                    } else {
-                        self.settings.update(SettingsUpdate {
-                            status: Some(
-                                "读取配置失败，Dock 保留了原设置。请查看日志了解详情。".into(),
-                            ),
-                            ..Default::default()
-                        });
-                    }
-                }
-                SettingsCommand::SetStartup { enabled, mode } => self.set_startup(enabled, mode),
-                SettingsCommand::SetStartupMode(mode) => self.set_startup_mode(mode),
-                SettingsCommand::SetFont(font_id) => self.set_settings_font(font_id),
-                SettingsCommand::RefreshDiagnostics => {
-                    let diagnostics = self.settings_diagnostics();
-                    self.settings.update(SettingsUpdate {
-                        diagnostics: Some(diagnostics),
-                        status: Some("诊断信息已更新。".into()),
-                        ..Default::default()
-                    });
-                }
-                SettingsCommand::CopyDiagnostics => {
-                    let diagnostics = self.settings_diagnostics();
-                    match copy_diagnostics(self.hwnd, &diagnostics) {
-                        Ok(()) => self.settings.update(SettingsUpdate {
-                            status: Some("诊断信息已复制到剪贴板。".into()),
-                            ..Default::default()
-                        }),
-                        Err(error) => self.settings.update(SettingsUpdate {
-                            status: Some(format!("复制失败：{error}")),
-                            ..Default::default()
-                        }),
-                    }
-                }
-                SettingsCommand::CopyMotionConfig => {
-                    let result = serde_json::to_string_pretty(&self.config.motion)
-                        .map_err(std::io::Error::other)
-                        .and_then(|text| copy_diagnostics(self.hwnd, &text));
-                    let status = result.map_or_else(
-                        |error| format!("复制动画配置失败：{error}"),
-                        |_| "动画配置 JSON 已复制到剪贴板。".into(),
-                    );
-                    self.settings.update(SettingsUpdate {
-                        status: Some(status),
-                        ..Default::default()
-                    });
-                }
-                SettingsCommand::CheckForUpdates => {
-                    self.updater.check_now();
-                    self.settings.update_update_view(self.updater.snapshot());
-                }
-                SettingsCommand::InstallUpdate => {
-                    self.updater.launch_update();
-                    self.settings.update_update_view(self.updater.snapshot());
-                }
-                SettingsCommand::OpenCnbReleases => {
-                    let _ = open_path("https://cnb.cool/won114514/Glide-Dock/-/releases");
-                }
-                SettingsCommand::OpenGithubReleases => {
-                    let _ = open_path("https://github.com/won114514/Glide-Dock/releases");
-                }
-                SettingsCommand::LaunchFailed(error) => {
-                    self.set_error(format!("设置窗口启动失败：{error}"));
-                }
+    pub(super) fn on_update_worker_ready(&mut self) {
+        let snapshot = self.updater.snapshot();
+        self.settings.update_update_view(&snapshot);
+    }
+
+    pub(super) fn on_settings_copydata(&mut self, bytes: &[u8]) {
+        let Ok(command) = serde_json::from_slice::<SettingsCommand>(bytes) else {
+            tracing::warn!("ignoring malformed settings IPC payload");
+            return;
+        };
+        match command {
+            SettingsCommand::RegisterUiWindow(raw_hwnd) => {
+                self.settings.register_ui_window(HWND(raw_hwnd as *mut _));
+            }
+            other => {
+                self.handle_settings_command(other);
+                let snapshot = self.updater.snapshot();
+                self.settings.update_update_view(&snapshot);
             }
         }
-        self.settings.update_update_view(self.updater.snapshot());
+    }
+
+    fn handle_settings_command(&mut self, command: SettingsCommand) {
+        match command {
+            SettingsCommand::RegisterUiWindow(_) => {}
+            SettingsCommand::Apply(values) => self.apply_settings(*values),
+            SettingsCommand::OpenConfigDirectory => self.open_config_dir(),
+            SettingsCommand::OpenLogDirectory => {
+                let directory = dock_storage::log_dir();
+                if let Err(error) = std::fs::create_dir_all(&directory) {
+                    self.set_error(format!("无法创建日志目录：{error}"));
+                } else if let Err(error) = open_path(&directory.to_string_lossy()) {
+                    self.set_error(format!("无法打开日志目录：{error}"));
+                }
+            }
+            SettingsCommand::Reset => {
+                let mut values = SettingsValues::from_config(&self.config);
+                values.appearance = Appearance::default();
+                values.behavior = Behavior::default();
+                values.motion = MotionConfig::default();
+                values.monitor = MonitorConfig::default();
+                self.apply_settings(values);
+                self.settings.update(SettingsUpdate {
+                    values: Some(SettingsValues::from_config(&self.config)),
+                    ..Default::default()
+                });
+            }
+            SettingsCommand::Reload => {
+                if self.reload_config() {
+                    self.settings.update(SettingsUpdate {
+                        values: Some(SettingsValues::from_config(&self.config)),
+                        status: Some("配置已重新加载。".into()),
+                        ..Default::default()
+                    });
+                } else {
+                    self.settings.update(SettingsUpdate {
+                        status: Some(
+                            "读取配置失败，Dock 保留了原设置。请查看日志了解详情。".into(),
+                        ),
+                        ..Default::default()
+                    });
+                }
+            }
+            SettingsCommand::SetStartup { enabled, mode } => {
+                self.set_startup(enabled, startup_mode_from(mode));
+            }
+            SettingsCommand::SetStartupMode(mode) => {
+                self.set_startup_mode(startup_mode_from(mode));
+            }
+            SettingsCommand::SetFont(font_id) => self.set_settings_font(font_id),
+            SettingsCommand::RefreshDiagnostics => {
+                let diagnostics = self.settings_diagnostics();
+                self.settings.update(SettingsUpdate {
+                    diagnostics: Some(diagnostics),
+                    status: Some("诊断信息已更新。".into()),
+                    ..Default::default()
+                });
+            }
+            SettingsCommand::CopyDiagnostics => {
+                let diagnostics = self.settings_diagnostics();
+                match copy_diagnostics(self.hwnd, &diagnostics) {
+                    Ok(()) => self.settings.update(SettingsUpdate {
+                        status: Some("诊断信息已复制到剪贴板。".into()),
+                        ..Default::default()
+                    }),
+                    Err(error) => self.settings.update(SettingsUpdate {
+                        status: Some(format!("复制失败：{error}")),
+                        ..Default::default()
+                    }),
+                }
+            }
+            SettingsCommand::CopyMotionConfig => {
+                let result = serde_json::to_string_pretty(&self.config.motion)
+                    .map_err(std::io::Error::other)
+                    .and_then(|text| copy_diagnostics(self.hwnd, &text));
+                let status = result.map_or_else(
+                    |error| format!("复制动画配置失败：{error}"),
+                    |_| "动画配置 JSON 已复制到剪贴板。".into(),
+                );
+                self.settings.update(SettingsUpdate {
+                    status: Some(status),
+                    ..Default::default()
+                });
+            }
+            SettingsCommand::CheckForUpdates => {
+                self.updater.check_now();
+            }
+            SettingsCommand::InstallUpdate => {
+                self.updater.launch_update();
+            }
+            SettingsCommand::OpenCnbReleases => {
+                let _ = open_path("https://cnb.cool/won114514/Glide-Dock/-/releases");
+            }
+            SettingsCommand::OpenGithubReleases => {
+                let _ = open_path("https://github.com/won114514/Glide-Dock/releases");
+            }
+            SettingsCommand::OpenLocalSecurityPolicy => {
+                if let Err(secpol_error) = open_path("secpol.msc")
+                    && let Err(gpedit_error) = open_path("gpedit.msc")
+                {
+                    tracing::warn!(
+                        %secpol_error,
+                        %gpedit_error,
+                        "could not open local security or group policy editor"
+                    );
+                    self.settings.update_notice_feedback(
+                        "无法打开 secpol.msc 或 gpedit.msc（Windows 家庭版可参考上方方法二执行命令）。",
+                    );
+                }
+            }
+            SettingsCommand::CopyNoticeCommand => {
+                match set_clipboard_text(self.hwnd, BUILTIN_ADMIN_COMMAND_TEXT) {
+                    Ok(()) => {
+                        self.settings.update_notice_feedback("命令已复制到剪贴板。");
+                    }
+                    Err(error) => {
+                        self.settings
+                            .update_notice_feedback(format!("复制命令失败：{error}"));
+                    }
+                }
+            }
+            SettingsCommand::QuitDock => {
+                self.quit();
+            }
+            SettingsCommand::LaunchFailed(error) => {
+                self.set_error(format!("设置窗口启动失败：{error}"));
+            }
+        }
     }
 
     fn apply_settings(&mut self, mut values: SettingsValues) {
@@ -874,6 +607,7 @@ impl DockApp {
         self.palette = palette_for(&self.config, self.theme);
         self.update_native_glass();
         self.apply_dock_layer();
+        self.sync_dock_font();
         let next_metrics = Metrics::new(
             &self.config.appearance,
             &self.config.behavior,
@@ -924,7 +658,7 @@ impl DockApp {
         };
         self.settings.update(SettingsUpdate {
             status: Some(status),
-            startup: Some((enabled, mode)),
+            startup: Some((enabled, startup_choice(mode))),
             ..Default::default()
         });
     }
@@ -938,7 +672,7 @@ impl DockApp {
         );
         self.settings.update(SettingsUpdate {
             status: Some(status),
-            startup: Some((false, mode)),
+            startup: Some((false, startup_choice(mode))),
             ..Default::default()
         });
     }
@@ -1016,10 +750,11 @@ impl DockApp {
         let shortcut = diagnostic_start_menu_shortcut();
         let log_directory = dock_storage::log_dir();
         format!(
-            "版本：{}\n进程 ID：{}\n内存工作集：{}\n运行权限：{}\nExplorer 进程 ID：{}\n守护进程：{}\nUAC：{}\n开机启动：{}\n开始菜单快捷方式：{}\n兼容性标记：{}\n程序路径：{}\n配置文件：{}\n日志目录：{}\n",
+            "版本：{}\n进程 ID：{}\n内存工作集：{}\nDock 字体：{}\n运行权限：{}\nExplorer 进程 ID：{}\n守护进程：{}\nUAC：{}\n开机启动：{}\n开始菜单快捷方式：{}\n兼容性标记：{}\n程序路径：{}\n配置文件：{}\n日志目录：{}\n",
             env!("CARGO_PKG_VERSION"),
             std::process::id(),
             memory,
+            self.active_dock_font.label(),
             privilege,
             if explorer_pid == 0 {
                 "不可用".into()
@@ -1069,58 +804,4 @@ fn diagnostic_start_menu_shortcut() -> String {
         .map_or_else(|| "未找到".into(), |path| path.display().to_string())
 }
 
-#[cfg(test)]
-mod update_view_tests {
-    use super::*;
-
-    #[test]
-    fn about_page_receives_no_update_downloading_ready_and_failure_states() {
-        let window = SettingsWindow::new().expect("settings component should initialize");
-        let mut snapshot = crate::update::UpdateSnapshot::default();
-        snapshot.managed = true;
-        snapshot.status = format!("当前已是最新版本 v{}。", env!("CARGO_PKG_VERSION"));
-        apply_update_view(&window, &snapshot);
-        assert!(window.get_update_managed());
-        assert_eq!(
-            window.get_update_message().as_str(),
-            snapshot.status.as_str()
-        );
-        assert!(!window.get_update_ready());
-
-        snapshot.checking = true;
-        snapshot.status = "正在同时检查 CNB 与 GitHub…".into();
-        apply_update_view(&window, &snapshot);
-        assert!(window.get_update_checking());
-        assert_eq!(
-            window.get_update_message().as_str(),
-            "正在同时检查 CNB 与 GitHub…"
-        );
-
-        snapshot.checking = false;
-        snapshot.downloading = true;
-        snapshot.latest_version = "0.5.0".into();
-        snapshot.progress = 42;
-        snapshot.status = "发现 v0.5.0，正在下载并验证安装包…".into();
-        apply_update_view(&window, &snapshot);
-        assert!(window.get_update_downloading());
-        assert_eq!(window.get_update_version().as_str(), "0.5.0");
-        assert!((window.get_update_progress() - 0.42).abs() < 0.001);
-
-        snapshot.downloading = false;
-        snapshot.ready = true;
-        snapshot.source = "CNB".into();
-        snapshot.status = "v0.5.0 已下载并校验完成，确认后即可安装。".into();
-        apply_update_view(&window, &snapshot);
-        assert!(window.get_update_ready());
-        assert_eq!(window.get_update_source().as_str(), "CNB");
-
-        snapshot.ready = false;
-        snapshot.status = "新版 v0.5.0 下载失败，请重试。".into();
-        apply_update_view(&window, &snapshot);
-        assert!(!window.get_update_ready());
-        assert_eq!(
-            window.get_update_message().as_str(),
-            "新版 v0.5.0 下载失败，请重试。"
-        );
-    }
-}
+const BUILTIN_ADMIN_COMMAND_TEXT: &str = r#"reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v FilterAdministratorToken /t REG_DWORD /d 1 /f"#;

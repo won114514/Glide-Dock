@@ -1060,32 +1060,42 @@ fn known_folder(id: &GUID) -> io::Result<PathBuf> {
 }
 
 fn request_dock_shutdown(install_directory: &Path) -> io::Result<()> {
-    if let Some(hwnd) = dock_platform_windows::find_window_by_title("Glide-Dock") {
-        let mut pid = 0;
-        unsafe {
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        }
-        if pid != 0 {
-            let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
-                .map_err(io::Error::other)?;
-            let mut buffer = vec![0u16; 32_768];
-            let mut length = buffer.len() as u32;
+    for title in [
+        "Glide-Dock",
+        "Glide-Dock 设置",
+        "建议开启内置管理员审批模式",
+        "检测到管理员权限",
+    ] {
+        if let Some(hwnd) = dock_platform_windows::find_window_by_title(title) {
+            let mut pid = 0;
             unsafe {
-                QueryFullProcessImageNameW(
-                    process,
-                    PROCESS_NAME_WIN32,
-                    PWSTR(buffer.as_mut_ptr()),
-                    &mut length,
-                )
+                GetWindowThreadProcessId(hwnd, Some(&mut pid));
             }
-            .map_err(io::Error::other)?;
-            let _ = unsafe { CloseHandle(process) };
-            let executable = PathBuf::from(String::from_utf16_lossy(&buffer[..length as usize]));
-            if executable
-                .parent()
-                .is_some_and(|parent| is_at_or_below(parent, install_directory))
+            if pid != 0
+                && let Ok(process) =
+                    unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
             {
-                request_shutdown_window(hwnd)?;
+                let mut buffer = vec![0u16; 32_768];
+                let mut length = buffer.len() as u32;
+                let ok = unsafe {
+                    QueryFullProcessImageNameW(
+                        process,
+                        PROCESS_NAME_WIN32,
+                        PWSTR(buffer.as_mut_ptr()),
+                        &mut length,
+                    )
+                };
+                let _ = unsafe { CloseHandle(process) };
+                if ok.is_ok() {
+                    let executable =
+                        PathBuf::from(String::from_utf16_lossy(&buffer[..length as usize]));
+                    if executable
+                        .parent()
+                        .is_some_and(|parent| is_at_or_below(parent, install_directory))
+                    {
+                        request_shutdown_window(hwnd)?;
+                    }
+                }
             }
         }
     }

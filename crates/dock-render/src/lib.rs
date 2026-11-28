@@ -7,11 +7,14 @@ pub mod icons;
 pub mod painter;
 pub mod preview;
 pub mod text;
+pub mod text_backend;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 pub use frame::{DockFrame, DrawCommand, HitShape, MenuOverlay};
+pub use text::Weight;
+pub use text_backend::TextBackend;
 
 use dock_core::layout::tooltip_rect;
 use dock_core::models::DockConfig;
@@ -24,7 +27,7 @@ use tiny_skia::{Color, FilterQuality, Pixmap, PixmapPaint, Transform};
 
 use crate::icons::IconSource;
 use crate::painter::MenuGlyph;
-use crate::text::{FontStack, Weight};
+use crate::text::FontStack;
 
 /// A drag in progress, prepared for rendering.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -252,7 +255,7 @@ impl RasterCache {
             return Some(Arc::clone(pixels));
         }
         let pixels = Arc::new(render()?);
-        if self.order.len() >= 256
+        if self.order.len() >= 32
             && let Some(oldest) = self.order.pop_front()
         {
             self.assets.remove(&oldest);
@@ -273,9 +276,16 @@ pub enum StartMenuStyle {
     Windows11,
 }
 
-/// The Glide-Dock renderer. Owns the loaded fonts and the shadow cache.
+impl RasterCache {
+    fn clear(&mut self) {
+        self.assets.clear();
+        self.order.clear();
+    }
+}
+
+/// The Glide-Dock renderer. Owns the active text backend and render caches.
 pub struct Renderer {
-    fonts: FontStack,
+    text: Arc<dyn TextBackend>,
     shadow_cache: Option<ShadowCache>,
     start_style: StartMenuStyle,
     raster_cache: RasterCache,
@@ -288,11 +298,23 @@ impl Default for Renderer {
 }
 
 impl Renderer {
-    /// Creates a renderer with the system fonts.
+    /// Creates a renderer with the built-in system font stack.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            fonts: FontStack::system(),
+            text: Arc::new(FontStack::system()),
+            shadow_cache: None,
+            start_style: StartMenuStyle::Windows11,
+            raster_cache: RasterCache::default(),
+        }
+    }
+
+    /// Creates a renderer backed by a custom [`TextBackend`] without loading
+    /// font files into heap memory.
+    #[must_use]
+    pub fn with_text_backend(text: Arc<dyn TextBackend>) -> Self {
+        Self {
+            text,
             shadow_cache: None,
             start_style: StartMenuStyle::Windows11,
             raster_cache: RasterCache::default(),
@@ -308,17 +330,29 @@ impl Renderer {
     #[must_use]
     pub fn with_fonts(fonts: FontStack) -> Self {
         Self {
-            fonts,
+            text: Arc::new(fonts),
             shadow_cache: None,
             start_style: StartMenuStyle::Windows11,
             raster_cache: RasterCache::default(),
         }
     }
 
-    /// Access to the loaded fonts (for menu measurement and previews).
+    /// Releases cached shadow and glyph rasters when settling into idle.
+    pub fn trim_caches(&mut self) {
+        self.shadow_cache = None;
+        self.raster_cache.clear();
+    }
+
+    /// Replaces the active text backend and clears cached glyph rasters.
+    pub fn set_text_backend(&mut self, text: Arc<dyn TextBackend>) {
+        self.text = text;
+        self.raster_cache.clear();
+    }
+
+    /// Access to the active text backend.
     #[must_use]
-    pub fn fonts(&self) -> &FontStack {
-        &self.fonts
+    pub fn fonts(&self) -> &dyn TextBackend {
+        &*self.text
     }
 
     /// Renders the dock into a transparent window-sized pixmap.
@@ -748,7 +782,7 @@ impl Renderer {
                     &mut pixels,
                     item,
                     Rect::new(0.0, 0.0, 128.0, 128.0),
-                    &self.fonts,
+                    &*self.text,
                     unresolved,
                 );
                 Some(pixels)
@@ -829,10 +863,10 @@ impl Renderer {
         let font_size = 13.5 * scale;
         let max_text = 260.0 * scale;
         let label = self
-            .fonts
+            .text
             .ellipsize(item.label(), max_text, font_size, Weight::Regular);
         let text_width = self
-            .fonts
+            .text
             .measure(&label, font_size, Weight::Regular)
             .max(1.0);
         let mut bubble = tooltip_rect(icon, text_width, scene.geometry, scene.metrics);
@@ -902,14 +936,14 @@ impl Renderer {
             .width
             .min(420.0 * scale)
             .max(120.0 * scale);
-        let label = self.fonts.ellipsize(
+        let label = self.text.ellipsize(
             message,
             max_width - 26.0 * scale,
             font_size,
             Weight::Regular,
         );
         let text_width = self
-            .fonts
+            .text
             .measure(&label, font_size, Weight::Regular)
             .max(40.0);
         let height = 30.0 * scale;
@@ -966,8 +1000,8 @@ impl Renderer {
         let subtitle = "从资源管理器拖到这里";
         let title_size = 14.5 * scale;
         let subtitle_size = 11.5 * scale;
-        let title_width = self.fonts.measure(title, title_size, Weight::Semibold);
-        let subtitle_width = self.fonts.measure(subtitle, subtitle_size, Weight::Regular);
+        let title_width = self.text.measure(title, title_size, Weight::Semibold);
+        let subtitle_width = self.text.measure(subtitle, subtitle_size, Weight::Regular);
         let text_width = title_width.max(subtitle_width).max(1.0);
         let badge = 34.0 * scale;
         let gap = 13.0 * scale;
@@ -1006,7 +1040,7 @@ impl Renderer {
         if title_width > 0.0 {
             let text_x = start + badge + gap;
             let title_baseline = self
-                .fonts
+                .text
                 .centered_baseline(center_y - 9.0 * scale, title_size);
             self.draw_cached_text(
                 frame,
@@ -1018,7 +1052,7 @@ impl Renderer {
                 Weight::Semibold,
             );
             let subtitle_baseline = self
-                .fonts
+                .text
                 .centered_baseline(center_y + 11.0 * scale, subtitle_size);
             self.draw_cached_text(
                 frame,
@@ -1043,8 +1077,8 @@ impl Renderer {
         color: ThemeColor,
         weight: Weight,
     ) {
-        let width = self.fonts.measure(text, size, weight);
-        let baseline = self.fonts.centered_baseline(y, size);
+        let width = self.text.measure(text, size, weight);
+        let baseline = self.text.centered_baseline(y, size);
         self.draw_cached_text(frame, text, x - width / 2.0, baseline, size, color, weight);
     }
 
@@ -1059,7 +1093,7 @@ impl Renderer {
         color: ThemeColor,
         weight: Weight,
     ) {
-        if text.is_empty() || color.a == 0 || !self.fonts.is_available() {
+        if text.is_empty() || color.a == 0 || !self.text.is_available() {
             return;
         }
         let color_rgb = [color.r, color.g, color.b];
@@ -1072,9 +1106,9 @@ impl Renderer {
         // Allow room for glyph overhang and keep baselines on pixel boundaries.
         let pad = size.ceil() as u32;
         if let Some(pixels) = self.raster_cache.get_or_render(key, || {
-            let width = self.fonts.measure(text, size, weight).ceil() as u32;
+            let width = self.text.measure(text, size, weight).ceil() as u32;
             let mut pixels = Pixmap::new(width + 2 * pad, 3 * pad)?;
-            self.fonts.draw(
+            self.text.draw(
                 &mut pixels,
                 text,
                 pad as f32,
@@ -1096,7 +1130,7 @@ impl Renderer {
     /// Measures the context menu for the given entries.
     #[must_use]
     pub fn menu_layout(&self, entries: &[MenuEntry], scale: f32) -> MenuLayout {
-        menu_layout(&self.fonts, entries, scale)
+        menu_layout(&*self.text, entries, scale)
     }
 
     /// Renders a context menu using a previously measured layout.
@@ -1202,13 +1236,13 @@ impl Renderer {
                     let max_text =
                         (row.rect.right() - 10.0 * scale - chevron_space - text_x).max(10.0);
                     let label = self
-                        .fonts
+                        .text
                         .ellipsize(label, max_text, font_size, Weight::Regular);
-                    self.fonts.draw(
+                    self.text.draw(
                         &mut pixmap,
                         &label,
                         text_x,
-                        self.fonts.centered_baseline(row.rect.center().y, font_size),
+                        self.text.centered_baseline(row.rect.center().y, font_size),
                         font_size,
                         text_color,
                         Weight::Regular,
@@ -1305,7 +1339,7 @@ fn glyph_for(icon: MenuIcon) -> MenuGlyph {
 
 /// Measures a context menu.
 #[must_use]
-pub fn menu_layout(fonts: &FontStack, entries: &[MenuEntry], scale: f32) -> MenuLayout {
+pub fn menu_layout(fonts: &dyn TextBackend, entries: &[MenuEntry], scale: f32) -> MenuLayout {
     let scale = scale.clamp(0.5, 4.0);
     let font_size = 13.5 * scale;
     let margin = 22.0 * scale;

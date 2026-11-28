@@ -408,6 +408,11 @@ impl D2dPainter {
                         bitmap: bitmap.clone(),
                     },
                 );
+                if self.upload.capacity() > 65_536 {
+                    self.upload = Vec::new();
+                } else {
+                    self.upload.clear();
+                }
                 bitmap
             }
         };

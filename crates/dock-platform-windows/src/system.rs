@@ -10,14 +10,15 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Security::{
     GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_ELEVATION,
-    TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenElevation, TokenIntegrityLevel,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenIntegrityLevel, TokenUser,
 };
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
+use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, REG_DWORD, RegCloseKey, RegOpenKeyExW,
-    RegQueryValueExW,
+    HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, REG_DWORD, RegCloseKey,
+    RegOpenKeyExW, RegQueryValueExW,
 };
 use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows::Win32::System::Threading::{
@@ -66,6 +67,13 @@ pub fn windows_build() -> u32 {
         version.dwBuildNumber
     } else {
         0
+    }
+}
+
+/// Trims unused resident pages from the current process working set.
+pub fn trim_working_set() {
+    unsafe {
+        let _ = EmptyWorkingSet(GetCurrentProcess());
     }
 }
 
@@ -135,6 +143,77 @@ pub fn is_elevated() -> bool {
         let _ = CloseHandle(token);
     }
     ok && elevation.TokenIsElevated != 0
+}
+
+const BUILTIN_ADMIN_RID: u32 = 500;
+const UAC_POLICIES_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System";
+
+/// Returns `true` when the current process belongs to the built-in
+/// Administrator account (SID ending with RID `500`).
+#[must_use]
+pub fn is_builtin_administrator() -> bool {
+    let mut token = HANDLE::default();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.is_err() {
+        return false;
+    }
+    let mut needed = 0u32;
+    let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut needed) };
+    let is_builtin = if needed > 0 {
+        let mut buffer = vec![0u64; needed.div_ceil(std::mem::size_of::<u64>() as u32) as usize];
+        let ok = unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                Some(buffer.as_mut_ptr().cast()),
+                needed,
+                &mut needed,
+            )
+        }
+        .is_ok();
+        if ok {
+            let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+            let count = unsafe { *GetSidSubAuthorityCount(user.User.Sid) };
+            if count > 0 {
+                let rid = unsafe { *GetSidSubAuthority(user.User.Sid, u32::from(count) - 1) };
+                rid == BUILTIN_ADMIN_RID
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    unsafe {
+        let _ = CloseHandle(token);
+    }
+    is_builtin
+}
+
+/// Returns `true` when UAC Admin Approval Mode is enabled for the built-in
+/// Administrator account (`EnableLUA != 0` and `FilterAdministratorToken == 1`).
+#[must_use]
+pub fn is_admin_approval_mode_enabled() -> bool {
+    let Ok(Some(key)) =
+        crate::registry::Key::open(HKEY_LOCAL_MACHINE, UAC_POLICIES_KEY, KEY_QUERY_VALUE)
+    else {
+        return false;
+    };
+    let enable_lua = key.dword("EnableLUA").ok().flatten();
+    let filter_admin = key.dword("FilterAdministratorToken").ok().flatten();
+    approval_mode_from_dwords(enable_lua, filter_admin)
+}
+
+/// Returns `true` when running under the built-in Administrator account with
+/// Admin Approval Mode disabled.
+#[must_use]
+pub fn is_builtin_admin_without_approval() -> bool {
+    is_builtin_administrator() && !is_admin_approval_mode_enabled()
+}
+
+const fn approval_mode_from_dwords(enable_lua: Option<u32>, filter_admin: Option<u32>) -> bool {
+    !matches!(enable_lua, Some(0)) && matches!(filter_admin, Some(1))
 }
 
 /// Shows a native information/warning message box owned by `owner`.
@@ -445,5 +524,22 @@ mod tests {
         if !paths.is_empty() {
             assert!(paths.iter().all(|path| !path.is_empty()));
         }
+    }
+
+    #[test]
+    fn approval_mode_requires_uac_and_filter_administrator_token() {
+        assert!(!approval_mode_from_dwords(None, None));
+        assert!(!approval_mode_from_dwords(Some(1), None));
+        assert!(!approval_mode_from_dwords(Some(1), Some(0)));
+        assert!(!approval_mode_from_dwords(Some(0), Some(1)));
+        assert!(approval_mode_from_dwords(Some(1), Some(1)));
+        assert!(approval_mode_from_dwords(None, Some(1)));
+    }
+
+    #[test]
+    fn builtin_admin_and_approval_queries_do_not_panic() {
+        let _ = is_builtin_administrator();
+        let _ = is_admin_approval_mode_enabled();
+        let _ = is_builtin_admin_without_approval();
     }
 }

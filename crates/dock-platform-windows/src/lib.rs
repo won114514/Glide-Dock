@@ -19,6 +19,7 @@ pub mod startup;
 pub mod store;
 pub mod surface;
 pub mod system;
+pub mod text;
 pub mod tracker;
 pub mod tray;
 pub mod window;
@@ -39,15 +40,21 @@ pub use store::{StoreApp, StoreAppService, WM_APP_STORE_APPS, pick_store_app, sc
 pub use surface::LayeredSurface;
 pub use system::{
     SingleInstance, SingleInstanceOutcome, activate_window, animations_enabled,
-    find_window_by_title, has_visible_window, is_elevated, is_low_integrity, prefers_light_theme,
-    running_executables, show_message, visible_window_paths, wait_for_desktop, windows_build,
+    find_window_by_title, has_visible_window, is_admin_approval_mode_enabled,
+    is_builtin_admin_without_approval, is_builtin_administrator, is_elevated, is_low_integrity,
+    prefers_light_theme, running_executables, show_message, trim_working_set, visible_window_paths,
+    wait_for_desktop, windows_build,
+};
+pub use text::{
+    TextBitmap, TextRenderer, TextWeight, centered_baseline, measure_text, rasterize_text,
 };
 pub use tracker::{WM_APP_LAUNCH_RESULT, WM_APP_WINDOW_EVENT, WindowTracker};
 pub use tray::{TrayCommand, TrayEvent, TrayIcon, WM_APP_TRAY};
 pub use window::{
-    capture_mouse, client_to_screen, create_layered_popup, cursor_position, hide, last_error,
-    place_above_desktop, register_class, release_mouse, screen_to_client, set_bounds, set_topmost,
-    show_no_activate, wide,
+    capture_mouse, client_to_screen, copydata_payload, create_layered_popup, create_message_window,
+    cursor_position, hide, is_window, last_error, place_above_desktop, register_class,
+    release_mouse, screen_to_client, send_copydata, set_bounds, set_topmost, show_no_activate,
+    wide,
 };
 
 /// Window class name for the dock window.

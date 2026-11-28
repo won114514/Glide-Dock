@@ -6,8 +6,10 @@ fn main() {
     if uninstall_only {
         println!("cargo:rustc-cfg=glide_uninstaller");
     }
-    println!("cargo:rerun-if-env-changed=GLIDE_DOCK_PAYLOAD_ZIP");
-    println!("cargo:rerun-if-env-changed=GLIDE_DOCK_UNINSTALL_EXE");
+    if !uninstall_only {
+        println!("cargo:rerun-if-env-changed=GLIDE_DOCK_PAYLOAD_ZIP");
+        println!("cargo:rerun-if-env-changed=GLIDE_DOCK_UNINSTALL_EXE");
+    }
     println!("cargo:rerun-if-changed=../assets/brand/03-Windows-ICO/Glide-Dock-FullColor.ico");
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set"));
     let mut definition = String::new();

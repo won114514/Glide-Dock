@@ -1,4 +1,4 @@
-import { access, copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -109,8 +109,6 @@ try {
   }
   await save('01-Logo/Glide-Dock-Logo-Horizontal.svg', horizontal);
   await save('01-Logo/Glide-Dock-Logo-Horizontal.png', await raster(horizontal, horizontalWidth * 2, 256));
-  await copyFile(path.join(brand, '03-Windows-ICO', 'Glide-Dock-FullColor.ico'), path.join(root, 'settings-app', 'Assets', 'Glide-Dock-FullColor.ico'));
-  await copyFile(path.join(brand, '02-App-Icons', 'FullColor', 'Glide-Dock-FullColor-128x128.png'), path.join(root, 'settings-app', 'Assets', 'Glide-Dock-FullColor-128.png'));
 
   await page.setViewportSize({ width: 1000, height: 600 });
   await page.setContent('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><style>'

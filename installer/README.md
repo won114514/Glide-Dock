@@ -55,8 +55,7 @@ Running a Low-integrity executable directly from Cargo's target directory
 shows an explanation before starting WebView2. Window creation failures
 display their actual error instead of panicking or assuming WebView2 is missing.
 The installer requires the Microsoft Edge WebView2 Runtime. The installed Dock
-and its Slint settings UI remain .NET-free; `settings-app` and `setup-app`
-retain their existing source but do not participate in current packaging.
+and its Slint settings UI remain .NET-free; the legacy WinUI projects have been removed.
 
 ## Interface and operations
 

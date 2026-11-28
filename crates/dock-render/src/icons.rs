@@ -8,7 +8,8 @@ use dock_core::models::{DockItem, ItemKind};
 use tiny_skia::{Color, Pixmap};
 
 use crate::painter;
-use crate::text::{FontStack, Weight};
+use crate::text::Weight;
+use crate::text_backend::TextBackend;
 
 /// Supplies application icons to the renderer.
 ///
@@ -133,7 +134,7 @@ pub fn draw_placeholder(
     pixmap: &mut Pixmap,
     item: &DockItem,
     rect: Rect,
-    fonts: &FontStack,
+    fonts: &dyn TextBackend,
     unresolved: bool,
 ) {
     if rect.width <= 1.0 || rect.height <= 1.0 {
@@ -338,11 +339,12 @@ mod tests {
     fn placeholder_draws_pixels() {
         let item = DockItem::application(1, "Editor", "C:\\Apps\\editor.exe");
         let mut pixmap = Pixmap::new(64, 64).expect("pixmap");
+        let fonts = crate::text::FontStack::empty();
         draw_placeholder(
             &mut pixmap,
             &item,
             Rect::new(0.0, 0.0, 64.0, 64.0),
-            &FontStack::empty(),
+            &fonts,
             false,
         );
         assert!(pixmap.pixels().iter().any(|pixel| pixel.alpha() > 200));

@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 
 use dock_core::layout::{FrameLayout, Metrics, target_scales};
 use dock_core::models::DockConfig;
@@ -19,6 +20,8 @@ use dock_render::icons::IconMap;
 use dock_render::preview;
 use dock_render::{DockScene, DragVisual, IconAnimation, MenuScene, Renderer};
 use tiny_skia::{FilterQuality, IntSize, Pixmap, PixmapPaint, Transform};
+
+use crate::text::NativeText;
 
 /// Curated demo applications (name, candidate paths in priority order).
 const SAMPLE_APPS: &[(&str, &[&str])] = &[
@@ -77,7 +80,7 @@ pub fn render_previews(directory: &Path) -> Result<(), Box<dyn std::error::Error
     std::fs::create_dir_all(directory)?;
     let config = demo_config();
     let icons = load_icons(&config);
-    let mut renderer = Renderer::new();
+    let mut renderer = Renderer::with_text_backend(Arc::new(NativeText::system()));
 
     let dark = ResolvedTheme::Dark;
     let light = ResolvedTheme::Light;
@@ -618,7 +621,29 @@ fn add_menu_overlay(
         return Ok(());
     };
     let anchor_x = icon.center().x;
-    let anchor_bottom = frame_layout.dock.top() - 8.0;
+    let mut anchor_bottom = frame_layout.dock.top() - 8.0;
+    let min_bottom = layout.bubble.bottom() + 2.0;
+    if anchor_bottom < min_bottom {
+        let extra_top = (min_bottom - anchor_bottom).ceil() as u32;
+        if let Some(mut taller) = Pixmap::new(dock_pixmap.width(), dock_pixmap.height() + extra_top)
+        {
+            let blit = PixmapPaint {
+                opacity: 1.0,
+                blend_mode: tiny_skia::BlendMode::SourceOver,
+                quality: FilterQuality::Nearest,
+            };
+            taller.draw_pixmap(
+                0,
+                extra_top as i32,
+                dock_pixmap.as_ref(),
+                &blit,
+                Transform::identity(),
+                None,
+            );
+            *dock_pixmap = taller;
+            anchor_bottom += extra_top as f32;
+        }
+    }
     let max_x = (dock_pixmap.width() as f32 - layout.window.width - 2.0).max(2.0);
     let max_y = (dock_pixmap.height() as f32 - layout.window.height - 2.0).max(2.0);
     let x = (anchor_x - layout.bubble.center().x).clamp(2.0, max_x);

@@ -243,6 +243,62 @@ pub enum DockLayer {
     Topmost,
 }
 
+/// Font backend preference for text rendered inside the Dock itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DockFont {
+    /// Use Windows DirectWrite shared system font cache (`Segoe UI` + OS CJK fallback).
+    ///
+    /// Keeps resident Dock memory minimal (typically under 5 MB).
+    #[default]
+    System,
+    /// Load the bundled variable font (`assets/fonts/NotoSansSC-VF.ttf`).
+    ///
+    /// Increases Dock memory usage noticeably compared to the system font.
+    NotoSansSc,
+}
+
+impl DockFont {
+    /// Stable identifier used in config, settings UI, and diagnostics.
+    #[must_use]
+    pub const fn as_id(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::NotoSansSc => "noto-sans-sc",
+        }
+    }
+
+    /// Parses a UI or configuration identifier, falling back to [`Self::System`].
+    #[must_use]
+    pub fn from_id(value: &str) -> Self {
+        match value {
+            "noto-sans-sc" => Self::NotoSansSc,
+            _ => Self::System,
+        }
+    }
+
+    /// Human-readable label shown in diagnostics.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::System => "Windows 系统字体（DirectWrite 共享缓存 · 省内存）",
+            Self::NotoSansSc => "内置中文字体（Noto Sans SC · 额外映射与缓存开销）",
+        }
+    }
+}
+
+impl Serialize for DockFont {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_id())
+    }
+}
+
+impl<'de> Deserialize<'de> for DockFont {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::from_id(&value))
+    }
+}
+
 /// Visual appearance, expressed in device independent pixels.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -278,6 +334,9 @@ pub struct Appearance {
     pub frosted_glass: bool,
     /// Prefer hardware rendering for the main Dock window.
     pub gpu_acceleration: bool,
+    /// Font used for labels and context menus rendered inside the Dock.
+    #[serde(default)]
+    pub dock_font: DockFont,
 }
 
 impl Default for Appearance {
@@ -294,7 +353,8 @@ impl Default for Appearance {
             layer: DockLayer::Desktop,
             edge_margin: 10.0,
             frosted_glass: true,
-            gpu_acceleration: true,
+            gpu_acceleration: false,
+            dock_font: DockFont::System,
         }
     }
 }
@@ -965,12 +1025,12 @@ mod tests {
         let mut config: DockConfig =
             serde_json::from_str(r#"{"appearance":{"frosted_glass":false}}"#)
                 .expect("load an existing configuration");
-        assert!(config.appearance.gpu_acceleration);
+        assert!(!config.appearance.gpu_acceleration);
 
-        config.appearance.gpu_acceleration = false;
-        let saved = serde_json::to_string(&config).expect("save the disabled preference");
+        config.appearance.gpu_acceleration = true;
+        let saved = serde_json::to_string(&config).expect("save the enabled preference");
         let reloaded: DockConfig = serde_json::from_str(&saved).expect("reload the preference");
-        assert!(!reloaded.appearance.gpu_acceleration);
+        assert!(reloaded.appearance.gpu_acceleration);
     }
 
     #[test]
@@ -1057,5 +1117,24 @@ mod tests {
         for preset in LaunchPreset::ALL {
             assert!(!preset.label().is_empty());
         }
+    }
+
+    #[test]
+    fn dock_font_defaults_to_system_and_unknowns_fall_back() {
+        assert_eq!(Appearance::default().dock_font, DockFont::System);
+
+        let legacy: Appearance = serde_json::from_str("{}").expect("legacy appearance");
+        assert_eq!(legacy.dock_font, DockFont::System);
+
+        let mut config = DockConfig::default();
+        config.appearance.dock_font = DockFont::NotoSansSc;
+        let saved = serde_json::to_string(&config).expect("serialize dock font");
+        let reloaded: DockConfig = serde_json::from_str(&saved).expect("deserialize dock font");
+        assert_eq!(reloaded.appearance.dock_font, DockFont::NotoSansSc);
+
+        let unknown: DockFont = serde_json::from_str("\"comic-sans\"").expect("fallback");
+        assert_eq!(unknown, DockFont::System);
+        assert_eq!(DockFont::from_id("unknown"), DockFont::System);
+        assert_eq!(DockFont::from_id("noto-sans-sc"), DockFont::NotoSansSc);
     }
 }

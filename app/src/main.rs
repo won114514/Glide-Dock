@@ -8,12 +8,14 @@ mod launcher;
 mod presenter;
 mod preview;
 mod render_loop;
+mod text;
 mod update;
 mod wndproc;
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use dock_platform_windows::startup;
 use dock_platform_windows::{
     ComGuard, DOCK_WINDOW_CLASS, SingleInstance, SingleInstanceOutcome, create_layered_popup,
     register_class, wait_for_desktop, wide,
@@ -32,11 +34,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
-use crate::app::{DockApp, WM_APP_OPEN_SETTINGS};
+use crate::app::{DockApp, WM_APP_ENSURE_TRAY, WM_APP_OPEN_SETTINGS};
 use crate::wndproc::{DockWindowState, dock_wndproc};
 
 fn main() -> std::process::ExitCode {
-    let options = match Options::parse(std::env::args().skip(1).collect()) {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args
+        .first()
+        .is_some_and(|arg| arg == startup::STARTUP_WORKER_FLAG)
+    {
+        return std::process::ExitCode::from(startup::run_startup_worker(&args) as u8);
+    }
+    let options = match Options::parse(args) {
         Ok(Some(options)) => options,
         Ok(None) => return std::process::ExitCode::SUCCESS,
         Err(error) => {
@@ -175,6 +184,10 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     };
     let guard_config = store.path().to_path_buf();
 
+    if options.autostart && !options.selftest {
+        repair_autostart_task();
+    }
+
     let _single_instance = if options.selftest {
         None
     } else {
@@ -182,6 +195,9 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
             SingleInstanceOutcome::Acquired(instance) => Some(instance),
             SingleInstanceOutcome::AlreadyRunning => {
                 tracing::info!("another Glide-Dock instance is already running");
+                if options.autostart {
+                    request_from_running_instance(WM_APP_ENSURE_TRAY, "restore the tray icon");
+                }
                 if options.open_settings {
                     request_settings_from_running_instance();
                 }
@@ -260,27 +276,46 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     result
 }
 
+fn repair_autostart_task() {
+    let result =
+        std::env::current_exe().and_then(|executable| startup::repair_existing_task(&executable));
+    match result {
+        Ok(true) => tracing::info!("repaired the existing Glide-Dock logon task"),
+        Ok(false) => {}
+        Err(error) => tracing::warn!(%error, "could not repair the existing logon task"),
+    }
+}
+
 fn request_settings_from_running_instance() {
+    let _ = request_from_running_instance(WM_APP_OPEN_SETTINGS, "open settings");
+}
+
+fn request_from_running_instance(message: u32, action: &str) -> bool {
     let class = wide(DOCK_WINDOW_CLASS);
-    let Ok(hwnd) = (unsafe { FindWindowW(PCWSTR::from_raw(class.as_ptr()), PCWSTR::null()) })
-    else {
-        tracing::warn!("could not find the running dock window to open settings");
-        return;
-    };
-    let mut result = 0usize;
-    let response = unsafe {
-        SendMessageTimeoutW(
-            hwnd,
-            WM_APP_OPEN_SETTINGS,
-            WPARAM(0),
-            LPARAM(0),
-            SMTO_ABORTIFHUNG,
-            2_000,
-            Some(&mut result),
-        )
-    };
-    if response.0 == 0 {
-        tracing::warn!("could not send the settings request to the running dock");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(hwnd) = unsafe { FindWindowW(PCWSTR::from_raw(class.as_ptr()), PCWSTR::null()) } {
+            let mut result = 0usize;
+            let response = unsafe {
+                SendMessageTimeoutW(
+                    hwnd,
+                    message,
+                    WPARAM(0),
+                    LPARAM(0),
+                    SMTO_ABORTIFHUNG,
+                    500,
+                    Some(&mut result),
+                )
+            };
+            if response.0 != 0 && result == 1 {
+                return true;
+            }
+        }
+        if Instant::now() >= deadline {
+            tracing::warn!(action, "running Dock did not acknowledge the request");
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 

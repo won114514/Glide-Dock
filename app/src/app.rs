@@ -9,24 +9,26 @@ use std::time::Instant;
 use dock_core::events::DockCommand;
 use dock_core::geometry::{Point, Rect};
 use dock_core::layout::{DockGeometry, FrameLayout, Metrics, insertion_index, insertion_x};
-use dock_core::models::{DockConfig, DockItem, DockLayer, ItemKind, LaunchType};
+use dock_core::models::{DockConfig, DockFont, DockItem, DockLayer, ItemKind, LaunchType};
+use dock_core::settings_ipc::{COPYDATA_UI_MAGIC, MAX_COPYDATA_BYTES, NoticeKind, SettingsValues};
 use dock_core::state::{DragSession, MenuAction, MenuEntry, MenuIcon, MenuTarget};
 use dock_core::theme::{Palette, ResolvedTheme, ThemeMode};
 use dock_core::{DockState, MotionEngine, MotionSnapshot, MotionTuning};
 use dock_platform_windows::{
-    DropPayload, GlassBackdrop, IconImage, IconService, LayeredSurface, MonitorMetrics,
-    PlatformError, ResolveService, ResolvedEntry, StoreAppService, TrayEvent, TrayIcon,
-    WM_APP_LAUNCH_RESULT, WM_APP_STORE_APPS, WM_APP_WINDOW_EVENT, WM_ICON_READY, WM_PATHS_RESOLVED,
-    WindowTracker, accept_files, animations_enabled, capture_mouse, create_layered_popup,
-    cursor_position, is_low_integrity, metrics_for_window, open_path, open_start_menu, parse_drop,
-    pick_store_app, place_above_desktop, place_dock, prefers_light_theme, register_class,
-    release_mouse, reveal, screen_to_client, set_bounds, set_topmost, show_no_activate,
-    visible_window_paths, windows_build,
+    DropPayload, GlassBackdrop, IconImage, IconService, LayeredSurface, MENU_WINDOW_CLASS,
+    MonitorMetrics, PlatformError, ResolveService, ResolvedEntry, StoreAppService, TrayEvent,
+    TrayIcon, WM_APP_LAUNCH_RESULT, WM_APP_STORE_APPS, WM_APP_WINDOW_EVENT, WM_ICON_READY,
+    WM_PATHS_RESOLVED, WindowTracker, accept_files, animations_enabled, capture_mouse,
+    clamp_window, copydata_payload, create_layered_popup, cursor_position,
+    is_builtin_admin_without_approval, is_elevated, is_low_integrity, metrics_for_window,
+    open_path, open_start_menu, parse_drop, pick_store_app, place_above_desktop, place_dock,
+    prefers_light_theme, register_class, release_mouse, reveal, screen_to_client, set_bounds,
+    set_topmost, show_no_activate, trim_working_set, visible_window_paths, windows_build,
 };
 use dock_render::icons::IconMap;
 use dock_render::{
-    DockFrame, DockScene, DragVisual, HitShape, IconAnimation, MenuLayout, MenuOverlay, MenuScene,
-    Renderer, StartMenuStyle,
+    DockFrame, DockScene, DragVisual, HitShape, IconAnimation, MenuLayout, MenuScene, Renderer,
+    StartMenuStyle,
 };
 use dock_storage::{ConfigStore, LoadOutcome, StorageError};
 use tiny_skia::{FilterQuality, IntSize, Pixmap, PixmapPaint, Transform};
@@ -39,12 +41,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::HDROP;
 use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetForegroundWindow, GetSystemMetrics,
-    GetWindowLongPtrW, HTCLIENT, HTTRANSPARENT, HWND_NOTOPMOST, HWND_TOPMOST, KillTimer,
-    MA_NOACTIVATE, PostQuitMessage, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_DROPFILES,
-    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST,
-    WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
+    GetWindowLongPtrW, HTCLIENT, HTTRANSPARENT, HWND_TOPMOST, KillTimer, MA_NOACTIVATE,
+    PostQuitMessage, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    SW_HIDE, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_COPYDATA, WM_DESTROY,
+    WM_DROPFILES, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+    WM_NCHITTEST, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
 };
 
 use crate::launcher::LauncherService;
@@ -54,11 +56,12 @@ use crate::wndproc::dock_wndproc;
 mod frame_stats;
 mod settings;
 use frame_stats::FrameStats;
-use settings::{SettingsHost, SettingsValues};
+use settings::SettingsHost;
 
 /// Mouse leave notification (defined in Win32::UI::Controls).
 const WM_MOUSELEAVE: u32 = 0x02A3;
 pub const WM_APP_OPEN_SETTINGS: u32 = WM_APP + 8;
+pub const WM_APP_ENSURE_TRAY: u32 = WM_APP + 9;
 pub(crate) const WM_APP_SETTINGS_COMMAND: u32 = WM_APP + 7;
 
 const TIMER_TOOLTIP: usize = 2;
@@ -66,8 +69,9 @@ const TIMER_SAVE: usize = 3;
 const TIMER_ERROR: usize = 4;
 const TIMER_MENU: usize = 5;
 const TIMER_RUNNING: usize = 6;
+const TIMER_TRAY_RETRY: usize = 8;
+const TRAY_RETRY_DELAYS_MS: [u32; 6] = [1_000, 2_000, 4_000, 8_000, 16_000, 29_000];
 
-const ICON_MASTER_SIZE: u32 = 256;
 const MENU_POLL_MS: u32 = 60;
 /// Coalesces the burst of WinEvent notifications produced while an
 /// application opens (create/show/child events arrive in quick succession).
@@ -93,12 +97,16 @@ pub enum AppError {
 }
 
 struct MenuView {
+    hwnd: HWND,
+    surface: LayeredSurface,
     entries: Vec<MenuEntry>,
     layout: MenuLayout,
-    position: Point,
+    screen_origin: POINT,
     pixmap: Arc<Pixmap>,
-    displayed: Option<Point>,
     hovered: Option<usize>,
+    dirty: bool,
+    last_alpha: u8,
+    last_offset: i32,
     closing: bool,
 }
 
@@ -107,18 +115,26 @@ impl MenuView {
         if self.closing {
             return None;
         }
-        self.layout.hit(point - self.displayed?)
+        self.layout.hit(point)
     }
 
     fn contains(&self, point: Point) -> bool {
         !self.closing
-            && self.displayed.is_some_and(|position| {
-                HitShape {
-                    rect: self.layout.bubble.translate(position.x, position.y),
-                    radius: self.layout.radius,
-                }
-                .contains(point)
-            })
+            && HitShape {
+                rect: self.layout.bubble,
+                radius: self.layout.radius,
+            }
+            .contains(point)
+    }
+}
+
+impl Drop for MenuView {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+            SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
+            let _ = DestroyWindow(self.hwnd);
+        }
     }
 }
 
@@ -130,20 +146,19 @@ struct TraySubmenuView {
     parent: usize,
     entries: Vec<MenuEntry>,
     layout: MenuLayout,
-    position: Point,
+    screen_position: Point,
 }
 
 struct TrayMenuView {
     hwnd: HWND,
     surface: LayeredSurface,
-    renderer: Renderer,
     origin: Point,
     width: u32,
     height: u32,
-    canvas: Pixmap,
+    canvas: Option<Pixmap>,
     entries: Vec<MenuEntry>,
     layout: MenuLayout,
-    position: Point,
+    screen_position: Point,
     child: Option<TraySubmenuView>,
     hovered: Option<usize>,
     child_hovered: Option<usize>,
@@ -151,39 +166,23 @@ struct TrayMenuView {
 }
 
 impl TrayMenuView {
-    fn create(owner: HWND, dpi_scale: f32) -> Result<Self, Box<dyn std::error::Error>> {
-        let scale = dpi_scale.max(0.5);
+    fn create(owner: HWND) -> Result<Self, Box<dyn std::error::Error>> {
         let instance = register_class(TRAY_MENU_CLASS, Some(dock_wndproc))?;
-        let width = ((unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) }.max(1) as f32) * scale)
-            .round() as u32;
-        let height = ((unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) }.max(1) as f32) * scale)
-            .round() as u32;
-        let origin = Point::new(
-            (unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) } as f32) * scale,
-            (unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) } as f32) * scale,
-        );
-        let hwnd =
-            create_layered_popup(instance, TRAY_MENU_CLASS, "Glide-Dock 菜单", width, height)?;
+        let hwnd = create_layered_popup(instance, TRAY_MENU_CLASS, "Glide-Dock 菜单", 1, 1)?;
         unsafe {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, GetWindowLongPtrW(owner, GWLP_USERDATA));
         }
         let surface = LayeredSurface::new(hwnd)?;
-        let canvas = Pixmap::new(width, height).ok_or_else(|| {
-            PlatformError::Window("tray menu canvas allocation failed".to_string())
-        })?;
-        let renderer = Renderer::new();
-        let layout = renderer.menu_layout(&[], 1.0);
         Ok(Self {
             hwnd,
             surface,
-            renderer,
-            origin,
-            width,
-            height,
-            canvas,
+            origin: Point::new(0.0, 0.0),
+            width: 1,
+            height: 1,
+            canvas: None,
             entries: Vec::new(),
-            layout,
-            position: Point::new(0.0, 0.0),
+            layout: dock_render::menu_layout(&dock_render::text::FontStack::empty(), &[], 1.0),
+            screen_position: Point::new(0.0, 0.0),
             child: None,
             hovered: None,
             child_hovered: None,
@@ -195,28 +194,31 @@ impl TrayMenuView {
         if !self.visible {
             return None;
         }
-        self.layout.hit(point - self.position)
+        let screen = Point::new(self.origin.x + point.x, self.origin.y + point.y);
+        self.layout.hit(screen - self.screen_position)
     }
 
     fn child_hit(&self, point: Point) -> Option<usize> {
+        let screen = Point::new(self.origin.x + point.x, self.origin.y + point.y);
         self.child
             .as_ref()
-            .and_then(|child| child.layout.hit(point - child.position))
+            .and_then(|child| child.layout.hit(screen - child.screen_position))
     }
 
     fn contains(&self, point: Point) -> bool {
+        let screen = Point::new(self.origin.x + point.x, self.origin.y + point.y);
         self.visible
-            && (self.layout.inside_bubble(point - self.position)
-                || self
-                    .child
-                    .as_ref()
-                    .is_some_and(|child| child.layout.inside_bubble(point - child.position)))
+            && (self.layout.inside_bubble(screen - self.screen_position)
+                || self.child.as_ref().is_some_and(|child| {
+                    child.layout.inside_bubble(screen - child.screen_position)
+                }))
     }
 
     fn child_contains(&self, point: Point) -> bool {
+        let screen = Point::new(self.origin.x + point.x, self.origin.y + point.y);
         self.child
             .as_ref()
-            .is_some_and(|child| child.layout.inside_bubble(point - child.position))
+            .is_some_and(|child| child.layout.inside_bubble(screen - child.screen_position))
     }
 }
 
@@ -224,6 +226,8 @@ impl Drop for TrayMenuView {
     fn drop(&mut self) {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_TRAY_MENU);
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+            SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
             let _ = DestroyWindow(self.hwnd);
         }
     }
@@ -249,9 +253,11 @@ pub struct DockApp {
     menu_spring: dock_core::ScalarSpring,
     palette: Palette,
     theme: ResolvedTheme,
+    active_dock_font: DockFont,
     icons: IconMap,
     icon_service: IconService,
     icon_generation: u64,
+    requested_icon_size: u32,
     resolve_service: ResolveService,
     monitor: MonitorMetrics,
     frames: FrameScheduler,
@@ -260,6 +266,8 @@ pub struct DockApp {
     save_timer: bool,
     error_timer: bool,
     running_timer: bool,
+    tray_retry_timer: bool,
+    tray_retry_index: usize,
     error_message: Option<String>,
     menu: Option<MenuView>,
     menu_pressed: Option<usize>,
@@ -330,7 +338,10 @@ impl DockApp {
         let resolve_service = ResolveService::spawn(hwnd);
         let window_tracker = WindowTracker::install(hwnd);
         let updater = crate::update::UpdateService::new(persist, hwnd.0 as isize);
-        let mut renderer = Renderer::new();
+        let dock_font = config.appearance.dock_font;
+        let mut renderer = Renderer::with_text_backend(Arc::new(
+            crate::text::NativeText::for_dock_font(dock_font),
+        ));
         let build = windows_build();
         renderer.set_start_style(if build == 0 || build >= 22000 {
             StartMenuStyle::Windows11
@@ -357,9 +368,11 @@ impl DockApp {
             menu_spring: dock_core::ScalarSpring::new(0.0, 540.0, 0.84),
             palette,
             theme,
+            active_dock_font: dock_font,
             icons: IconMap::new(),
             icon_service,
             icon_generation: 0,
+            requested_icon_size: Self::desired_icon_size(&metrics),
             resolve_service,
             monitor,
             frames: FrameScheduler::new(hwnd, monitor.refresh_hz),
@@ -368,6 +381,8 @@ impl DockApp {
             save_timer: false,
             error_timer: false,
             running_timer: false,
+            tray_retry_timer: false,
+            tray_retry_index: 0,
             error_message: None,
             menu: None,
             menu_pressed: None,
@@ -419,12 +434,13 @@ impl DockApp {
         }
         accept_files(hwnd);
         if show {
-            match TrayIcon::install(hwnd) {
-                Ok(tray) => {
-                    app.tray = Some(tray);
-                }
-                Err(error) => tracing::warn!(%error, "could not install notification-area icon"),
+            let tray = TrayIcon::install(hwnd);
+            let installed = tray.is_installed();
+            app.tray = Some(tray);
+            if !installed {
+                app.schedule_tray_retry();
             }
+            app.check_startup_privilege_notice();
         }
 
         if outcome.migrated && !outcome.read_only {
@@ -444,6 +460,9 @@ impl DockApp {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        if self.menu.as_ref().is_some_and(|menu| menu.hwnd == hwnd) {
+            return self.handle_menu_window_message(hwnd, msg, wparam, lparam);
+        }
         if self
             .tray_menu
             .as_ref()
@@ -544,13 +563,30 @@ impl DockApp {
                 }
                 LRESULT(0)
             }
+            WM_COPYDATA => {
+                if let Some(bytes) =
+                    unsafe { copydata_payload(lparam, COPYDATA_UI_MAGIC, MAX_COPYDATA_BYTES) }
+                {
+                    self.on_settings_copydata(&bytes);
+                    return LRESULT(1);
+                }
+                LRESULT(0)
+            }
             WM_APP_SETTINGS_COMMAND => {
-                self.on_settings_commands();
+                self.on_update_worker_ready();
                 LRESULT(0)
             }
             WM_APP_OPEN_SETTINGS => {
                 self.show_settings();
-                LRESULT(0)
+                LRESULT(1)
+            }
+            WM_APP_ENSURE_TRAY => {
+                if self.tray.is_some() {
+                    self.ensure_tray_installed();
+                    LRESULT(1)
+                } else {
+                    LRESULT(0)
+                }
             }
             WM_APP_WINDOW_EVENT => {
                 self.on_window_event();
@@ -644,8 +680,7 @@ impl DockApp {
     fn on_mouse_move(&mut self, lparam: LPARAM) {
         let point = mouse_point(lparam);
 
-        if self.menu.as_ref().is_some_and(|menu| !menu.closing) {
-            self.update_menu_hover(point);
+        if self.menu.is_some() {
             return;
         }
 
@@ -739,17 +774,9 @@ impl DockApp {
     }
 
     fn on_left_down(&mut self, point: Point) {
+        let _ = point;
         if self.menu.is_some() {
-            if self.menu.as_ref().is_some_and(|menu| menu.closing) {
-                return;
-            }
-            if let Some(entry) = self.menu_hit(point) {
-                self.menu_pressed = Some(entry);
-            } else if self.menu.as_ref().is_some_and(|menu| menu.contains(point)) {
-                // Clicking padding keeps the menu open, like a native menu.
-            } else {
-                self.close_menu();
-            }
+            self.close_menu();
             return;
         }
 
@@ -786,12 +813,6 @@ impl DockApp {
     }
 
     fn on_left_up(&mut self, point: Point) {
-        if let Some(entry) = self.menu_pressed.take() {
-            if self.menu_hit(point) == Some(entry) {
-                self.activate_menu_entry(entry);
-            }
-            return;
-        }
         let Some(drag) = self.state.drag.take() else {
             release_mouse();
             return;
@@ -952,21 +973,65 @@ impl DockApp {
             MenuTarget::Background => point.y - 4.0 * self.monitor.dpi_scale,
         };
 
-        let window = self.geometry.window;
-        let max_x = (window.width - layout.window.width - 2.0).max(2.0);
-        let max_y = (window.height - layout.window.height - 2.0).max(2.0);
-        let position = Point::new(
-            (anchor_x - layout.bubble.center().x).clamp(2.0, max_x),
-            (anchor_bottom - layout.bubble.bottom()).clamp(2.0, max_y),
-        );
+        let win_w = frame.pixmap.width();
+        let win_h = frame.pixmap.height();
+        let screen_anchor_x = self.window_origin.0 + anchor_x.round() as i32;
+        let screen_anchor_y = self.window_origin.1 + anchor_bottom.round() as i32;
+        let desired_x = screen_anchor_x - layout.bubble.center().x.round() as i32;
+        let desired_y = screen_anchor_y - layout.bubble.bottom().round() as i32;
+        let (x, y) = clamp_window(desired_x, desired_y, win_w, win_h, self.monitor.work);
+
+        let Ok(instance) = register_class(MENU_WINDOW_CLASS, Some(dock_wndproc)) else {
+            return;
+        };
+        let Ok(hwnd) = create_layered_popup(
+            instance,
+            MENU_WINDOW_CLASS,
+            "Glide-Dock 上下文菜单",
+            win_w,
+            win_h,
+        ) else {
+            return;
+        };
+        unsafe {
+            SetWindowLongPtrW(
+                hwnd,
+                GWLP_USERDATA,
+                GetWindowLongPtrW(self.hwnd, GWLP_USERDATA),
+            );
+        }
+        let Ok(mut surface) = LayeredSurface::new(hwnd) else {
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                let _ = DestroyWindow(hwnd);
+            }
+            return;
+        };
+        let _ = surface.present_alpha(win_w, win_h, frame.pixmap.data(), 0);
+        let initial_offset = (9.0 * self.monitor.dpi_scale).round() as i32;
+        unsafe {
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                x,
+                y + initial_offset,
+                win_w as i32,
+                win_h as i32,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
 
         self.menu = Some(MenuView {
+            hwnd,
+            surface,
             entries,
             layout: frame.layout,
-            position,
+            screen_origin: POINT { x, y },
             pixmap: Arc::new(frame.pixmap),
-            displayed: None,
             hovered: None,
+            dirty: true,
+            last_alpha: 0,
+            last_offset: initial_offset,
             closing: false,
         });
         self.menu_spring.set_target(1.0);
@@ -1021,8 +1086,59 @@ impl DockApp {
         if let Some(menu) = self.menu.as_mut() {
             menu.pixmap = Arc::new(frame.pixmap);
             menu.hovered = hovered;
+            menu.dirty = true;
         }
         self.animate();
+    }
+
+    fn handle_menu_window_message(
+        &mut self,
+        hwnd: HWND,
+        msg: u32,
+        _wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match msg {
+            WM_MOUSEMOVE => {
+                self.update_menu_hover(mouse_point(lparam));
+                LRESULT(0)
+            }
+            WM_LBUTTONDOWN => {
+                if self.menu.as_ref().is_some_and(|menu| menu.closing) {
+                    return LRESULT(0);
+                }
+                let point = mouse_point(lparam);
+                if let Some(entry) = self.menu_hit(point) {
+                    self.menu_pressed = Some(entry);
+                } else if !self.menu.as_ref().is_some_and(|menu| menu.contains(point)) {
+                    self.close_menu();
+                }
+                LRESULT(0)
+            }
+            WM_LBUTTONUP => {
+                if let Some(entry) = self.menu_pressed.take()
+                    && self.menu_hit(mouse_point(lparam)) == Some(entry)
+                {
+                    self.activate_menu_entry(entry);
+                }
+                LRESULT(0)
+            }
+            WM_RBUTTONUP | WM_CLOSE => {
+                self.close_menu();
+                LRESULT(0)
+            }
+            WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+            WM_NCHITTEST => {
+                let client = screen_to_client(hwnd, screen_point(lparam));
+                let point = Point::new(client.x as f32, client.y as f32);
+                if self.menu.as_ref().is_some_and(|menu| menu.contains(point)) {
+                    LRESULT(HTCLIENT as isize)
+                } else {
+                    LRESULT(HTTRANSPARENT as isize)
+                }
+            }
+            _ => unsafe { DefWindowProcW(hwnd, msg, _wparam, lparam) },
+        }
     }
 
     fn menu_hit(&self, point: Point) -> Option<usize> {
@@ -1137,9 +1253,11 @@ impl DockApp {
         let Some(cursor) = cursor_position() else {
             return;
         };
+        let menu_client = screen_to_client(menu.hwnd, cursor);
+        let menu_point = Point::new(menu_client.x as f32, menu_client.y as f32);
+        let over_menu = menu.contains(menu_point);
         let client = screen_to_client(self.hwnd, cursor);
         let point = Point::new(client.x as f32, client.y as f32);
-        let over_menu = menu.contains(point);
         let over_dock = self.layout.hit_background(point) || self.hit_icon(point).is_some();
         if over_menu || over_dock {
             return;
@@ -1501,6 +1619,7 @@ impl DockApp {
                 self.icon_generation = self.icon_generation.wrapping_add(1);
                 self.icons = IconMap::new();
                 self.close_menu_immediately();
+                self.sync_dock_font();
                 self.theme = resolve_theme(self.config.appearance.theme);
                 self.palette = palette_for(&self.config, self.theme);
                 self.refresh_glass_state();
@@ -1514,6 +1633,22 @@ impl DockApp {
                 self.set_error(format!("重新加载配置失败：{error}"));
                 false
             }
+        }
+    }
+
+    pub(super) fn sync_dock_font(&mut self) {
+        let next = self.config.appearance.dock_font;
+        if next == self.active_dock_font {
+            return;
+        }
+        self.close_menu_immediately();
+        self.tray_menu = None;
+        self.renderer
+            .set_text_backend(Arc::new(crate::text::NativeText::for_dock_font(next)));
+        self.renderer.trim_caches();
+        self.active_dock_font = next;
+        if next == DockFont::System {
+            trim_working_set();
         }
     }
 
@@ -1537,14 +1672,92 @@ impl DockApp {
         match event {
             TrayEvent::OpenSettings => self.show_settings(),
             TrayEvent::ShowMenu => self.open_tray_menu(),
-            TrayEvent::ReAdd => {
-                if let Some(tray) = self.tray.as_mut()
-                    && let Err(error) = tray.reinstall()
-                {
-                    tracing::warn!(%error, "could not restore notification-area icon");
+            TrayEvent::ReAdd => self.restore_tray_after_taskbar(),
+        }
+    }
+
+    fn ensure_tray_installed(&mut self) {
+        if self.shutdown_done || self.tray.is_none() {
+            return;
+        }
+        if self.tray.as_ref().is_some_and(TrayIcon::is_installed) {
+            self.reset_tray_retry();
+            return;
+        }
+        let result = self
+            .tray
+            .as_mut()
+            .expect("tray existence checked")
+            .ensure_installed();
+        match result {
+            Ok(()) => {
+                tracing::info!("notification-area icon restored");
+                self.reset_tray_retry();
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not restore notification-area icon");
+                if !self.tray_retry_timer {
+                    self.schedule_tray_retry();
                 }
             }
         }
+    }
+
+    fn restore_tray_after_taskbar(&mut self) {
+        self.reset_tray_retry();
+        let Some(tray) = self.tray.as_mut() else {
+            return;
+        };
+        match tray.reinstall() {
+            Ok(()) => tracing::info!("notification-area icon restored after Explorer restart"),
+            Err(error) => {
+                tracing::warn!(%error, "could not restore notification-area icon after Explorer restart");
+                self.schedule_tray_retry();
+            }
+        }
+    }
+
+    fn schedule_tray_retry(&mut self) {
+        if self.shutdown_done
+            || self.tray_retry_timer
+            || self.tray.as_ref().is_none_or(TrayIcon::is_installed)
+        {
+            return;
+        }
+        let Some(delay) = tray_retry_delay(self.tray_retry_index) else {
+            tracing::warn!(
+                "notification-area retries exhausted; waiting for Explorer restart or autostart"
+            );
+            return;
+        };
+        let created = unsafe { SetTimer(Some(self.hwnd), TIMER_TRAY_RETRY, delay, None) };
+        if created == 0 {
+            tracing::warn!(delay, "could not schedule notification-area retry");
+            return;
+        }
+        self.tray_retry_timer = true;
+    }
+
+    fn reset_tray_retry(&mut self) {
+        if self.tray_retry_timer {
+            self.kill_timer(TIMER_TRAY_RETRY);
+        }
+        self.tray_retry_timer = false;
+        self.tray_retry_index = 0;
+    }
+
+    fn on_tray_retry(&mut self) {
+        self.tray_retry_timer = false;
+        if self.shutdown_done || self.tray.is_none() {
+            self.tray_retry_index = 0;
+            return;
+        }
+        if self.tray.as_ref().is_some_and(TrayIcon::is_installed) {
+            self.reset_tray_retry();
+            return;
+        }
+        self.tray_retry_index += 1;
+        self.ensure_tray_installed();
     }
 
     fn tray_root_entries(&self) -> Vec<MenuEntry> {
@@ -1600,7 +1813,7 @@ impl DockApp {
 
     fn open_tray_menu(&mut self) {
         if self.tray_menu.is_none() {
-            match TrayMenuView::create(self.hwnd, self.monitor.dpi_scale) {
+            match TrayMenuView::create(self.hwnd) {
                 Ok(menu) => self.tray_menu = Some(menu),
                 Err(error) => {
                     tracing::warn!(%error, "could not create tray menu");
@@ -1611,80 +1824,85 @@ impl DockApp {
         let Some(cursor) = cursor_position() else {
             return;
         };
-        let Some(menu) = self.tray_menu.as_ref() else {
-            return;
-        };
-        let origin = menu.origin;
         let entries = self.tray_root_entries();
-        let layout = menu.renderer.menu_layout(&entries, self.monitor.dpi_scale);
-        let local = Point::new(cursor.x as f32 - origin.x, cursor.y as f32 - origin.y);
+        let layout = self.renderer.menu_layout(&entries, self.monitor.dpi_scale);
         let bubble = layout.bubble;
-        let mut position = Point::new(
-            local.x - bubble.center().x,
-            local.y - bubble.height - 4.0 * self.monitor.dpi_scale,
+        let vx = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) } as f32;
+        let vy = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) } as f32;
+        let vw = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) }.max(1) as f32;
+        let vh = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) }.max(1) as f32;
+        let mut screen_position = Point::new(
+            cursor.x as f32 - bubble.center().x,
+            cursor.y as f32 - bubble.height - 4.0 * self.monitor.dpi_scale,
         );
-        let max_x = (menu.width as f32 - layout.window.width - 2.0).max(2.0);
-        let max_y = (menu.height as f32 - layout.window.height - 2.0).max(2.0);
-        position.x = position.x.clamp(2.0, max_x);
-        position.y = position.y.clamp(2.0, max_y);
+        screen_position.x = screen_position.x.clamp(
+            vx + 2.0,
+            (vx + vw - layout.window.width - 2.0).max(vx + 2.0),
+        );
+        screen_position.y = screen_position.y.clamp(
+            vy + 2.0,
+            (vy + vh - layout.window.height - 2.0).max(vy + 2.0),
+        );
 
         let Some(menu) = self.tray_menu.as_mut() else {
             return;
         };
         menu.entries = entries;
         menu.layout = layout;
-        menu.position = position;
+        menu.screen_position = screen_position;
         menu.child = None;
         menu.hovered = None;
         menu.child_hovered = None;
         menu.visible = true;
-        unsafe {
-            let _ = SetWindowPos(
-                menu.hwnd,
-                Some(HWND_TOPMOST),
-                origin.x as i32,
-                origin.y as i32,
-                menu.width as i32,
-                menu.height as i32,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
-            let _ = SetTimer(Some(menu.hwnd), TIMER_TRAY_MENU, TRAY_MENU_POLL_MS, None);
-            let _ = SetCapture(menu.hwnd);
-        }
+        let menu_hwnd = menu.hwnd;
         self.render_tray_menu();
+        unsafe {
+            let _ = SetTimer(Some(menu_hwnd), TIMER_TRAY_MENU, TRAY_MENU_POLL_MS, None);
+            let _ = SetCapture(menu_hwnd);
+        }
     }
 
     fn open_tray_child(&mut self, parent: usize) {
         let Some(entries) = self.tray_child_entries(parent) else {
             return;
         };
+        let layout = self.renderer.menu_layout(&entries, self.monitor.dpi_scale);
         let Some(menu) = self.tray_menu.as_mut() else {
             return;
         };
-        let layout = menu.renderer.menu_layout(&entries, self.monitor.dpi_scale);
         let Some(row) = menu.layout.rows.iter().find(|row| row.entry == parent) else {
             return;
         };
         let root_bubble = menu.layout.bubble;
         let child_bubble = layout.bubble;
-        let right = menu.position.x + root_bubble.right() + 4.0;
-        let mut position = Point::new(
+        let right = menu.screen_position.x + root_bubble.right() + 4.0;
+        let vx = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) } as f32;
+        let vy = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) } as f32;
+        let vw = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) }.max(1) as f32;
+        let vh = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) }.max(1) as f32;
+        let mut screen_position = Point::new(
             right - child_bubble.left(),
-            menu.position.y + row.rect.top() - child_bubble.top(),
+            menu.screen_position.y + row.rect.top() - child_bubble.top(),
         );
-        if position.x + layout.window.width > menu.width as f32 - 2.0 {
-            position.x = menu.position.x + root_bubble.left()
+        if screen_position.x + layout.window.width > vx + vw - 2.0 {
+            screen_position.x = menu.screen_position.x + root_bubble.left()
                 - child_bubble.width
                 - 4.0
                 - child_bubble.left();
         }
-        let max_y = (menu.height as f32 - layout.window.height - 2.0).max(2.0);
-        position.y = position.y.clamp(2.0, max_y);
+        screen_position.x = screen_position.x.clamp(
+            vx + 2.0,
+            (vx + vw - layout.window.width - 2.0).max(vx + 2.0),
+        );
+        screen_position.y = screen_position.y.clamp(
+            vy + 2.0,
+            (vy + vh - layout.window.height - 2.0).max(vy + 2.0),
+        );
         menu.child = Some(TraySubmenuView {
             parent,
             entries,
             layout,
-            position,
+            screen_position,
         });
         menu.hovered = Some(parent);
         menu.child_hovered = None;
@@ -1692,10 +1910,10 @@ impl DockApp {
     }
 
     fn render_tray_menu(&mut self) {
-        let Some(menu) = self.tray_menu.as_mut() else {
+        let Some(menu) = self.tray_menu.as_ref() else {
             return;
         };
-        let Some(root) = menu.renderer.render_menu(&MenuScene {
+        let Some(root) = self.renderer.render_menu(&MenuScene {
             entries: &menu.entries,
             layout: &menu.layout,
             hovered: menu.hovered,
@@ -1704,69 +1922,101 @@ impl DockApp {
             return;
         };
         let child = menu.child.as_ref().and_then(|child| {
-            menu.renderer
+            self.renderer
                 .render_menu(&MenuScene {
                     entries: &child.entries,
                     layout: &child.layout,
                     hovered: menu.child_hovered,
                     palette: self.palette,
                 })
-                .map(|frame| (frame, child.position))
+                .map(|frame| (frame, child.screen_position))
         });
-        menu.canvas.fill(tiny_skia::Color::TRANSPARENT);
+
+        let mut min_x = menu.screen_position.x;
+        let mut min_y = menu.screen_position.y;
+        let mut max_x = min_x + root.pixmap.width() as f32;
+        let mut max_y = min_y + root.pixmap.height() as f32;
+        if let Some((ref frame, pos)) = child {
+            min_x = min_x.min(pos.x);
+            min_y = min_y.min(pos.y);
+            max_x = max_x.max(pos.x + frame.pixmap.width() as f32);
+            max_y = max_y.max(pos.y + frame.pixmap.height() as f32);
+        }
+        let origin_x = min_x.floor() as i32;
+        let origin_y = min_y.floor() as i32;
+        let width = (max_x.ceil() as i32 - origin_x).max(1) as u32;
+        let height = (max_y.ceil() as i32 - origin_y).max(1) as u32;
+
+        let Some(menu) = self.tray_menu.as_mut() else {
+            return;
+        };
+        menu.origin = Point::new(origin_x as f32, origin_y as f32);
+        menu.width = width;
+        menu.height = height;
+        let needs_alloc = menu
+            .canvas
+            .as_ref()
+            .is_none_or(|canvas| canvas.width() != width || canvas.height() != height);
+        if needs_alloc {
+            let Some(new_canvas) = Pixmap::new(width, height) else {
+                tracing::warn!("tray menu canvas allocation failed");
+                return;
+            };
+            menu.canvas = Some(new_canvas);
+        }
+        let Some(canvas) = menu.canvas.as_mut() else {
+            return;
+        };
+        canvas.fill(tiny_skia::Color::TRANSPARENT);
         let paint = PixmapPaint {
             opacity: 1.0,
             blend_mode: tiny_skia::BlendMode::SourceOver,
             quality: FilterQuality::Nearest,
         };
-        menu.canvas.draw_pixmap(
-            menu.position.x.round() as i32,
-            menu.position.y.round() as i32,
+        canvas.draw_pixmap(
+            (menu.screen_position.x - origin_x as f32).round() as i32,
+            (menu.screen_position.y - origin_y as f32).round() as i32,
             root.pixmap.as_ref(),
             &paint,
             Transform::identity(),
             None,
         );
         if let Some((frame, position)) = child {
-            menu.canvas.draw_pixmap(
-                position.x.round() as i32,
-                position.y.round() as i32,
+            canvas.draw_pixmap(
+                (position.x - origin_x as f32).round() as i32,
+                (position.y - origin_y as f32).round() as i32,
                 frame.pixmap.as_ref(),
                 &paint,
                 Transform::identity(),
                 None,
             );
         }
-        if let Err(error) = menu
-            .surface
-            .present(menu.width, menu.height, menu.canvas.data())
-        {
+        unsafe {
+            let _ = SetWindowPos(
+                menu.hwnd,
+                Some(HWND_TOPMOST),
+                origin_x,
+                origin_y,
+                width as i32,
+                height as i32,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
+        if let Err(error) = menu.surface.present(width, height, canvas.data()) {
             tracing::warn!(%error, "could not present tray menu");
         }
     }
 
     fn close_tray_menu(&mut self) {
-        let Some(menu) = self.tray_menu.as_mut() else {
+        if self.tray_menu.is_none() {
             return;
-        };
-        menu.visible = false;
-        menu.child = None;
+        }
         unsafe {
             let _ = ReleaseCapture();
-            let _ = KillTimer(Some(menu.hwnd), TIMER_TRAY_MENU);
-            let _ = ShowWindow(menu.hwnd, SW_HIDE);
-            let _ = SetWindowPos(
-                menu.hwnd,
-                Some(HWND_NOTOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOACTIVATE
-                    | windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE
-                    | windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE,
-            );
         }
+        self.tray_menu = None;
+        self.renderer.trim_caches();
+        trim_working_set();
     }
 
     fn on_tray_menu_move(&mut self, point: Point) {
@@ -1937,17 +2187,41 @@ impl DockApp {
         self.animate();
     }
 
+    fn check_startup_privilege_notice(&mut self) {
+        let notice = if is_builtin_admin_without_approval() {
+            tracing::warn!("built-in Administrator account is running without Admin Approval Mode");
+            Some(NoticeKind::BuiltinAdminApproval)
+        } else if is_elevated() {
+            tracing::warn!("Glide-Dock is running elevated; UIPI will block drag-and-drop");
+            Some(NoticeKind::ElevatedWarning)
+        } else {
+            None
+        };
+        if let Some(kind) = notice {
+            let values = SettingsValues::from_config(&self.config);
+            let snapshot = self.updater.snapshot();
+            if let Err(error) =
+                self.settings
+                    .open_notice(self.hwnd, kind, values, self.store.path(), &snapshot)
+            {
+                tracing::error!(%error, "failed to open privilege notice dialog");
+            }
+        }
+    }
+
     fn open_settings(&mut self) {
         if self.read_only {
             self.set_error("配置为只读，暂时无法打开设置".to_string());
             return;
         }
         let values = SettingsValues::from_config(&self.config);
-        if let Err(error) = self.settings.open(self.hwnd, values, self.store.path()) {
+        let snapshot = self.updater.snapshot();
+        if let Err(error) = self
+            .settings
+            .open(self.hwnd, values, self.store.path(), &snapshot)
+        {
             tracing::error!(%error, "failed to open settings");
             self.set_error(format!("无法打开设置窗口：{error}"));
-        } else {
-            self.settings.update_update_view(self.updater.snapshot());
         }
     }
 
@@ -2058,7 +2332,12 @@ impl DockApp {
         {
             self.ensure_native_glass();
         }
-        self.icons.set_capacity(self.config.items.len().max(64));
+        self.icons.set_capacity(self.config.items.len().max(16));
+        let needed_icon_size = Self::desired_icon_size(&self.metrics);
+        if needed_icon_size > self.requested_icon_size {
+            self.requested_icon_size = needed_icon_size;
+            self.request_all_icons();
+        }
         self.close_menu_immediately();
     }
 
@@ -2195,11 +2474,7 @@ impl DockApp {
         })
     }
 
-    fn prepare_frame(
-        &mut self,
-        snapshot: &MotionSnapshot,
-        layout: &FrameLayout,
-    ) -> (DockFrame, Option<Point>) {
+    fn prepare_frame(&mut self, snapshot: &MotionSnapshot, layout: &FrameLayout) -> DockFrame {
         let drag = self.drag_visual(layout);
         let animations = Self::icon_animations(snapshot);
         let scene = DockScene {
@@ -2219,29 +2494,11 @@ impl DockApp {
             error_progress: self.error_spring.value(),
             drag,
         };
-        let overlay = self.menu.as_ref().and_then(|menu| {
-            let opacity = self.menu_spring.value().clamp(0.0, 1.0);
-            if opacity <= 0.01 {
-                return None;
-            }
-            let offset = ((1.0 - opacity) * 9.0 * self.monitor.dpi_scale).round();
-            let position = Point::new(menu.position.x.round(), menu.position.y.round() + offset);
-            Some(MenuOverlay {
-                hit: (!menu.closing).then_some(HitShape {
-                    rect: menu.layout.bubble.translate(position.x, position.y),
-                    radius: menu.layout.radius,
-                }),
-                pixels: &menu.pixmap,
-                position,
-                opacity,
-            })
-        });
-        let position = overlay.as_ref().map(|overlay| overlay.position);
-        (self.renderer.prepare_frame(&scene, overlay), position)
+        self.renderer.prepare_frame(&scene, None)
     }
 
     fn present(&mut self, snapshot: &MotionSnapshot, layout: FrameLayout) -> Submission {
-        let (frame, menu_position) = self.prepare_frame(snapshot, &layout);
+        let frame = self.prepare_frame(snapshot, &layout);
         let result = self.presenter.present(
             &mut self.renderer,
             &frame,
@@ -2250,11 +2507,44 @@ impl DockApp {
         if result == Submission::Presented {
             self.layout = layout;
             self.hit_shapes = frame.hit_shapes;
-            if let Some(menu) = &mut self.menu {
-                menu.displayed = menu_position;
+        }
+        self.present_menu();
+        result
+    }
+
+    fn present_menu(&mut self) {
+        let Some(menu) = &mut self.menu else {
+            return;
+        };
+        let opacity = self.menu_spring.value().clamp(0.0, 1.0);
+        let alpha = (opacity * 255.0).round() as u8;
+        let offset = ((1.0 - opacity) * 9.0 * self.monitor.dpi_scale).round() as i32;
+        if offset != menu.last_offset {
+            menu.last_offset = offset;
+            unsafe {
+                let _ = SetWindowPos(
+                    menu.hwnd,
+                    None,
+                    menu.screen_origin.x,
+                    menu.screen_origin.y + offset,
+                    0,
+                    0,
+                    SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE,
+                );
             }
         }
-        result
+        if menu.dirty || menu.last_alpha != alpha {
+            if let Err(error) = menu.surface.present_alpha(
+                menu.pixmap.width(),
+                menu.pixmap.height(),
+                menu.pixmap.data(),
+                alpha,
+            ) {
+                tracing::warn!(%error, "could not present menu");
+            }
+            menu.dirty = false;
+            menu.last_alpha = alpha;
+        }
     }
 
     pub fn frame_wait_handle(&self) -> Option<HANDLE> {
@@ -2307,6 +2597,8 @@ impl DockApp {
 
     fn stop_frames(&mut self) {
         self.frames.stop();
+        self.renderer.trim_caches();
+        trim_working_set();
         if let Some(stats) = &mut self.frame_stats {
             stats.finish(self.presenter.gpu_active());
         }
@@ -2330,6 +2622,7 @@ impl DockApp {
             TIMER_ERROR,
             TIMER_MENU,
             TIMER_RUNNING,
+            TIMER_TRAY_RETRY,
         ] {
             self.kill_timer(id);
         }
@@ -2337,6 +2630,8 @@ impl DockApp {
         self.save_timer = false;
         self.error_timer = false;
         self.running_timer = false;
+        self.tray_retry_timer = false;
+        self.tray_retry_index = 0;
     }
 
     fn on_timer(&mut self, id: usize) {
@@ -2375,6 +2670,7 @@ impl DockApp {
                 self.running_timer = false;
                 self.refresh_running();
             }
+            TIMER_TRAY_RETRY => self.on_tray_retry(),
             _ => {}
         }
     }
@@ -2408,6 +2704,12 @@ impl DockApp {
         }
     }
 
+    fn desired_icon_size(metrics: &Metrics) -> u32 {
+        (metrics.icon * metrics.max_factor)
+            .ceil()
+            .clamp(64.0, 256.0) as u32
+    }
+
     fn request_all_icons(&self) {
         for item in &self.config.items {
             self.request_item_icons(item);
@@ -2437,8 +2739,12 @@ impl DockApp {
         if paths.is_empty() {
             return;
         }
-        self.icon_service
-            .request(item.id, paths, ICON_MASTER_SIZE, self.icon_generation);
+        self.icon_service.request(
+            item.id,
+            paths,
+            self.requested_icon_size,
+            self.icon_generation,
+        );
     }
 
     fn refresh_running(&mut self) {
@@ -2545,7 +2851,7 @@ impl DockApp {
     /// timer invariant. It writes nothing, including the configuration.
     pub fn selftest(&mut self) -> bool {
         let (snapshot, layout) = self.update_motion_layout(0.0);
-        let (frame, _) = self.prepare_frame(&snapshot, &layout);
+        let frame = self.prepare_frame(&snapshot, &layout);
         let Some(pixmap) = self.renderer.render_frame(&frame) else {
             tracing::error!("selftest: renderer produced no pixmap");
             return false;
@@ -2555,6 +2861,7 @@ impl DockApp {
             && !self.save_timer
             && !self.error_timer
             && !self.running_timer
+            && !self.tray_retry_timer
             && !self.state.menu_open;
         let gpu_requested = self.config.appearance.gpu_acceleration;
         let mut submitted = self
@@ -2584,11 +2891,16 @@ impl DockApp {
             save_timer = self.save_timer,
             error_timer = self.error_timer,
             running_timer = self.running_timer,
+            tray_retry_timer = self.tray_retry_timer,
             menu_open = self.state.menu_open,
             "selftest finished"
         );
         ok
     }
+}
+
+fn tray_retry_delay(index: usize) -> Option<u32> {
+    TRAY_RETRY_DELAYS_MS.get(index).copied()
 }
 
 fn target_matches(target: &str, visible: &str) -> bool {
@@ -2662,7 +2974,18 @@ fn key_down(key: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY) -> bo
 
 #[cfg(test)]
 mod tests {
-    use super::target_matches;
+    use super::{TRAY_RETRY_DELAYS_MS, target_matches, tray_retry_delay};
+
+    #[test]
+    fn tray_retries_are_bounded_to_one_minute() {
+        assert_eq!(
+            (0..TRAY_RETRY_DELAYS_MS.len())
+                .map(|index| tray_retry_delay(index).expect("scheduled delay"))
+                .sum::<u32>(),
+            60_000
+        );
+        assert_eq!(tray_retry_delay(TRAY_RETRY_DELAYS_MS.len()), None);
+    }
 
     #[test]
     fn exact_paths_match_case_insensitively() {

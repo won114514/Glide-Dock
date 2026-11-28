@@ -4,20 +4,6 @@
 /uninstaller/gen/
 **/*.rs.bk
 
-# .NET / WinUI build locals
-/.dotnet/
-/.dotnet-home/
-/.nuget/
-/.appdata/
-/.localappdata/
-/settings-app/bin/
-/settings-app/obj/
-/settings-app/publish/
-/setup-app/bin/
-/setup-app/obj/
-/setup-app/publish/
-/tools/dotnet-install.ps1
-
 # OS / editor
 Thumbs.db
 .DS_Store

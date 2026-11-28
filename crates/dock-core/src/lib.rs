@@ -14,6 +14,7 @@ pub mod layout;
 pub mod magnification;
 pub mod models;
 pub mod motion;
+pub mod settings_ipc;
 pub mod state;
 pub mod theme;
 
@@ -24,7 +25,7 @@ pub use layout::{
     DockGeometry, FrameLayout, Metrics, insertion_index, insertion_x, target_scales, tooltip_rect,
 };
 pub use models::{
-    Appearance, Behavior, CONFIG_VERSION, DockConfig, DockItem, DockLayer, DockPosition,
+    Appearance, Behavior, CONFIG_VERSION, DockConfig, DockFont, DockItem, DockLayer, DockPosition,
     HoverPreset, ItemKind, LaunchPreset, LaunchType, MAX_HOVER_SCALE, MonitorConfig, MotionConfig,
 };
 pub use motion::{

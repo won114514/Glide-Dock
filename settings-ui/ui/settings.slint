@@ -1,16 +1,7 @@
 import { AboutSlint, Button, ComboBox, Palette, ProgressIndicator, ScrollView, Slider, Switch } from "std-widgets.slint";
+import { SettingsStyle } from "styles.slint";
 import { WindowControls } from "window-controls.slint";
-
-// One palette is shared by the window, cards, text and standard controls.
-global SettingsStyle {
-    in-out property <bool> dark: false;
-    out property <color> canvas: dark ? #181c20 : #f5f7f9;
-    out property <color> sidebar: dark ? #20252a : #edf1f5;
-    out property <color> surface: dark ? #252b31 : #ffffff;
-    out property <color> line: dark ? #373e46 : #dfe5eb;
-    out property <color> text: dark ? #edf2f7 : #202c38;
-    out property <color> muted: dark ? #aab6c2 : #647586;
-}
+export { NoticeDialog } from "notice-dialog.slint";
 
 component SettingCard inherits Rectangle {
     in property <string> title;
@@ -97,6 +88,83 @@ component ContentCard inherits Rectangle {
     content := VerticalLayout { padding: 16px; spacing: 12px; @children }
 }
 
+component DockFontCard inherits Rectangle {
+    in-out property <string> dock-font: "system";
+    callback edited();
+    property <bool> stacked: self.width < 560px;
+    property <length> control-width: 244px;
+    min-width: 0px;
+    preferred-height: content.preferred-height;
+    height: self.preferred-height;
+    vertical-stretch: 0;
+    background: SettingsStyle.surface;
+    border-color: SettingsStyle.line;
+    border-width: 1px;
+    border-radius: 8px;
+
+    content := VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+        Rectangle {
+            min-width: 0px;
+            preferred-height: root.stacked ? font-info.preferred-height + 46px : max(34px, font-info.preferred-height);
+            height: self.preferred-height;
+            font-info := VerticalLayout {
+                x: 0px;
+                y: root.stacked ? 0px : (parent.height - self.height) / 2;
+                width: root.stacked ? parent.width : max(0px, parent.width - root.control-width - 20px);
+                height: self.preferred-height;
+                spacing: 4px;
+                Text { text: "Dock 字体"; color: SettingsStyle.text; font-size: 14px; font-weight: 600; wrap: word-wrap; }
+                Text {
+                    text: "控制 Dock 图标悬停提示、右键菜单与托盘菜单使用的字体，与下方设置窗口字体相互独立。";
+                    color: SettingsStyle.muted;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+            }
+            ComboBox {
+                x: root.stacked ? 0px : parent.width - root.control-width;
+                y: root.stacked ? font-info.height + 12px : (parent.height - 34px) / 2;
+                width: root.stacked ? parent.width : root.control-width;
+                height: 34px;
+                model: ["Windows 系统字体（省内存 · 推荐）", "内置中文字体（占用更多内存）"];
+                current-index: root.dock-font == "noto-sans-sc" ? 1 : 0;
+                selected => {
+                    root.dock-font = self.current-index == 1 ? "noto-sans-sc" : "system";
+                    root.edited();
+                }
+            }
+        }
+        Rectangle {
+            min-width: 0px;
+            preferred-height: dock-font-notice.preferred-height + 20px;
+            height: self.preferred-height;
+            border-radius: 6px;
+            border-width: 1px;
+            background: root.dock-font == "noto-sans-sc"
+                ? (SettingsStyle.dark ? #362918 : #fff7e6)
+                : (SettingsStyle.dark ? #1e2832 : #f0f6fc);
+            border-color: root.dock-font == "noto-sans-sc"
+                ? (SettingsStyle.dark ? #8a6121 : #f0c36d)
+                : (SettingsStyle.dark ? #2d4256 : #c8dff5);
+            dock-font-notice := Text {
+                x: 12px;
+                y: 10px;
+                width: parent.width - 24px;
+                color: root.dock-font == "noto-sans-sc"
+                    ? (SettingsStyle.dark ? #f6d38b : #7c4a03)
+                    : SettingsStyle.muted;
+                font-size: 12px;
+                wrap: word-wrap;
+                text: root.dock-font == "noto-sans-sc"
+                    ? "内存提示：当前正在使用内置字体（NotoSansSC-VF.ttf，文件约 17.8 MB）。虽然已通过 Windows DirectWrite 按需映射优化，相比系统字体仍会带来额外的私有内存与字体文件映射缓存开销（绘制悬停提示和菜单字形时增长）。如需最低常驻占用，建议切回「Windows 系统字体」。"
+                    : "内存说明：当前默认使用 Windows DirectWrite 系统字体共享缓存，Dock 无需加载大体积字体文件，常驻内存可压至 5 MB 以内。若切换为「内置中文字体」，Dock 会加载约 17.8 MB 的 NotoSansSC-VF.ttf 字体映射并产生额外的字体缓存开销。";
+            }
+        }
+    }
+}
+
 component SectionLabel inherits Text {
     color: SettingsStyle.muted;
     font-size: 12px;
@@ -157,6 +225,7 @@ export component SettingsWindow inherits Window {
     in-out property <string> theme: "system";
     in-out property <string> accent: "blue";
     in-out property <string> layer: "desktop";
+    in-out property <string> dock-font: "system";
     in-out property <string> font-id: "noto-sans-sc";
     in-out property <float> icon-size: 48;
     in-out property <float> spacing: 18;
@@ -164,7 +233,7 @@ export component SettingsWindow inherits Window {
     in-out property <float> corner-radius: 20;
     in-out property <float> dock-opacity: 78;
     in-out property <bool> frosted-glass: true;
-    in-out property <bool> gpu-acceleration: true;
+    in-out property <bool> gpu-acceleration: false;
     in-out property <float> edge-margin: 10;
     in-out property <float> monitor-offset: 0;
     in-out property <bool> magnification: true;
@@ -283,9 +352,13 @@ export component SettingsWindow inherits Window {
                                     selected => { root.theme = ["system", "light", "dark"][self.current-index]; root.settings-changed(); }
                                 }
                             }
+                            DockFontCard {
+                                dock-font <=> root.dock-font;
+                                edited => { root.settings-changed(); }
+                            }
                             SettingCard {
                                 title: "设置窗口字体";
-                                description: "内置字体仅在此窗口使用，无需安装到系统。";
+                                description: "仅在设置与提示窗口生效（窗口关闭后进程立即退出释放内存，不影响 Dock 常驻内存）。";
                                 ComboBox {
                                     height: 34px;
                                     model: ["内置中文字体", "Windows 系统字体"];
@@ -425,7 +498,7 @@ export component SettingsWindow inherits Window {
                             spacing: 8px;
                             SectionLabel { text: "维护工具"; }
                             ContentCard {
-                                BodyText { text: "设置窗口与 Dock 同进程运行，关闭设置窗口后 Dock 会继续运行。"; }
+                                BodyText { text: "设置窗口独立按需启动，关闭设置窗口后即自动释放内存与字体资源，Dock 会继续运行。"; }
                                 HorizontalLayout {
                                     spacing: 8px;
                                     Button { text: "打开配置目录"; height: 34px; clicked => { root.action("open-config"); } }

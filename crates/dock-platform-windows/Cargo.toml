@@ -9,7 +9,9 @@ license.workspace = true
 [dependencies]
 dock-core.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 windows.workspace = true
+windows-core = "0.62.2"
 windows-numerics.workspace = true

@@ -14,7 +14,7 @@ cargo run -p glide-dock -- --render-preview preview
 ```
 
 设置中心截图使用 `cargo run --release -p glide-dock -- --settings` 打开当前界面后截取。
-旧版 `settings-app` / `setup-app` 不参与当前发布流程。
+旧版 `settings-app` / `setup-app` 已删除，不参与当前发布流程。
 
 | 文件 | 说明 |
 | --- | --- |

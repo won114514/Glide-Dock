@@ -1,3 +1,4 @@
+﻿param([switch]$SkipBuild)
 # Builds a runnable Glide-Dock distribution outside the repository.
 # The package contains the Rust Dock and its documentation. The standalone
 # Tauri installer is built separately by build-installer.ps1.
@@ -11,10 +12,15 @@ $local = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicat
 if ([string]::IsNullOrWhiteSpace($local)) { throw 'LOCALAPPDATA is unavailable' }
 $stageRoot = Join-Path $local 'Glide-Dock'
 $stage = Join-Path $stageRoot "Glide-Dock-v$version"
-Write-Host "Building Glide-Dock $version..."
-cargo build --locked --release -p glide-dock | Out-Host
-if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
+if (-not $SkipBuild) {
+    Write-Host "Building Glide-Dock $version..."
+    cargo build --locked --release -p glide-dock -p glide-settings | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
+} else {
+    Write-Host "Packaging prebuilt Glide-Dock $version..."
+}
 if (-not (Test-Path -LiteralPath (Join-Path $root 'target\release\glide-dock.exe'))) { throw 'Rust release output is missing target\release\glide-dock.exe' }
+if (-not (Test-Path -LiteralPath (Join-Path $root 'target\release\glide-settings.exe'))) { throw 'Rust release output is missing target\release\glide-settings.exe' }
 if (Test-Path -LiteralPath $stage) {
     $resolvedStage = (Resolve-Path -LiteralPath $stage).Path
     $resolvedRoot = (Resolve-Path -LiteralPath $stageRoot).Path
@@ -24,6 +30,7 @@ if (Test-Path -LiteralPath $stage) {
 }
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item -LiteralPath 'target\release\glide-dock.exe' -Destination (Join-Path $stage 'glide-dock.exe') -Force
+Copy-Item -LiteralPath 'target\release\glide-settings.exe' -Destination (Join-Path $stage 'glide-settings.exe') -Force
 Copy-Item -LiteralPath 'README.md' -Destination (Join-Path $stage 'README.md') -Force
 Copy-Item -LiteralPath 'docs\ANIMATION.md' -Destination (Join-Path $stage 'ANIMATION.md') -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'docs') | Out-Null
@@ -32,8 +39,8 @@ Copy-Item -LiteralPath 'assets' -Destination (Join-Path $stage 'assets') -Recurs
 # Slint loads the bundled Chinese font from the installed assets directory.
 $fontDirectory = Join-Path $stage 'assets\fonts'
 New-Item -ItemType Directory -Force -Path $fontDirectory | Out-Null
-Copy-Item -LiteralPath 'settings-app\Assets\Fonts\NotoSansSC-VF.ttf' -Destination (Join-Path $fontDirectory 'NotoSansSC-VF.ttf') -Force
-Copy-Item -LiteralPath 'settings-app\licenses\OFL-1.1.txt' -Destination (Join-Path $fontDirectory 'OFL-1.1.txt') -Force
+Copy-Item -LiteralPath 'assets\fonts\NotoSansSC-VF.ttf' -Destination (Join-Path $fontDirectory 'NotoSansSC-VF.ttf') -Force
+Copy-Item -LiteralPath 'assets\fonts\OFL-1.1.txt' -Destination (Join-Path $fontDirectory 'OFL-1.1.txt') -Force
 Copy-Item -LiteralPath 'LICENSE-MIT' -Destination (Join-Path $stage 'LICENSE-MIT') -Force
 Copy-Item -LiteralPath 'LICENSE-APACHE' -Destination (Join-Path $stage 'LICENSE-APACHE') -Force
 @"
@@ -53,6 +60,7 @@ function Assert-MediumIntegrity([string] $Path) {
     if (($acl | Out-String) -match 'Low Mandatory Level|低强制级别|低完整性|Низкий обязательный уровень') { throw "Refusing to package a Low-integrity executable: $Path" }
 }
 Assert-MediumIntegrity (Join-Path $stage 'glide-dock.exe')
+Assert-MediumIntegrity (Join-Path $stage 'glide-settings.exe')
 $zip = Join-Path $stageRoot "Glide-Dock-v$version-payload.zip"
 if (Test-Path -LiteralPath $zip) {
     $resolvedZip = [IO.Path]::GetFullPath($zip)

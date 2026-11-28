@@ -4,6 +4,7 @@
 > 上游文档：[README.md](README.md)（产品定位与里程碑）、[ARCHITECTURE.md](ARCHITECTURE.md)（架构、流程与数学）
 > 本文件是**施工单**：按什么顺序、动哪些文件、怎么证明做完了。三者冲突时以 ARCHITECTURE 为准，本文件负责排序与验收。
 > **v0.3.3 交付状态**：M0 ✅ · M1 ✅ · M2 ✅（G2 通过） · M3 🟡 部分 · M4 ✅ 设置中心与启动动画已落地 · M5–M6 ⬜ 待开始。
+> **当前方案**：M4 已改为 Slint 设置中心；旧版 WinUI 3 `settings-app`、.NET `setup-app` 和 `scripts/build-settings.ps1` 已删除，本文相关任务卡仅作历史记录。
 > 实际交付、偏差与验证记录见 §12。
 
 ---

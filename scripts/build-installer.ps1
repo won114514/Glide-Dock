@@ -1,4 +1,4 @@
-param([string]$OutputDirectory, [switch]$SkipRestore)
+param([string]$OutputDirectory, [switch]$SkipRestore, [switch]$SkipFrontendBuild)
 # Builds the standalone Rust + Tauri Glide-Dock installer.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -76,33 +76,51 @@ function Remove-SafeFile([string]$Path,[string]$AllowedRoot) {
     Remove-Item -LiteralPath $full -Force
 }
 New-Item -ItemType Directory -Force -Path $output | Out-Null
-& (Join-Path $PSScriptRoot 'build-installer-ui.ps1') -SkipRestore:$SkipRestore
-if ($buildPayload) {
-    & (Join-Path $PSScriptRoot 'package.ps1')
-    if ($LASTEXITCODE -ne 0) { throw "Package build failed with exit code $LASTEXITCODE" }
+$uiDistIndex = Join-Path $root 'target\installer-ui\index.html'
+if ($SkipFrontendBuild) {
+    if (-not (Test-Path -LiteralPath $uiDistIndex)) { throw "Prebuilt installer frontend is missing: $uiDistIndex" }
+    Write-Host 'Using prebuilt installer frontend in target\installer-ui...'
+} else {
+    & (Join-Path $PSScriptRoot 'build-installer-ui.ps1') -SkipRestore:$SkipRestore
 }
-if (-not (Test-Path -LiteralPath $payloadSource)) { throw "Package payload is missing: $payloadSource" }
-$payloadSource = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $payloadSource).Path)
-$payloadDestination = [IO.Path]::GetFullPath($payload)
-$samePayloadPath = [string]::Equals($payloadSource, $payloadDestination, [StringComparison]::OrdinalIgnoreCase)
-if (-not $samePayloadPath) { Copy-Item -LiteralPath $payloadSource -Destination $payloadDestination -Force }
-if (-not (Test-Path -LiteralPath $payload)) { throw "Package payload copy is missing: $payload" }
 $hadPayloadEnvironment = Test-Path Env:GLIDE_DOCK_PAYLOAD_ZIP
 $previousPayloadEnvironment = $env:GLIDE_DOCK_PAYLOAD_ZIP
-if (-not $hadPayloadEnvironment -or -not $samePayloadPath) {
-    $env:GLIDE_DOCK_PAYLOAD_ZIP = $payloadDestination
-}
 $hadUninstallerEnvironment = Test-Path Env:GLIDE_DOCK_UNINSTALL_EXE
 $previousUninstallerEnvironment = $env:GLIDE_DOCK_UNINSTALL_EXE
 try {
-    Write-Host "Building Glide-Dock uninstaller $version..."
-    cargo build --locked --release -p glide-uninstall | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw "Uninstaller build failed with exit code $LASTEXITCODE" }
+    if ($buildPayload) {
+        Remove-Item Env:GLIDE_DOCK_PAYLOAD_ZIP -ErrorAction SilentlyContinue
+        Remove-Item Env:GLIDE_DOCK_UNINSTALL_EXE -ErrorAction SilentlyContinue
+        Write-Host "Building Glide-Dock binaries and uninstaller $version..."
+        cargo build --locked --release -p glide-dock -p glide-settings -p glide-uninstall | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "Workspace release prebuild failed with exit code $LASTEXITCODE" }
+        & (Join-Path $PSScriptRoot 'package.ps1') -SkipBuild
+        if ($LASTEXITCODE -ne 0) { throw "Package build failed with exit code $LASTEXITCODE" }
+    } else {
+        Write-Host "Building Glide-Dock uninstaller $version..."
+        cargo build --locked --release -p glide-uninstall | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "Uninstaller build failed with exit code $LASTEXITCODE" }
+    }
+    if (-not (Test-Path -LiteralPath $payloadSource)) { throw "Package payload is missing: $payloadSource" }
+    $payloadSource = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $payloadSource).Path)
+    $payloadDestination = [IO.Path]::GetFullPath($payload)
+    $samePayloadPath = [string]::Equals($payloadSource, $payloadDestination, [StringComparison]::OrdinalIgnoreCase)
+    if (-not $samePayloadPath) { Copy-Item -LiteralPath $payloadSource -Destination $payloadDestination -Force }
+    if (-not (Test-Path -LiteralPath $payload)) { throw "Package payload copy is missing: $payload" }
+    if (-not $hadPayloadEnvironment -or -not $samePayloadPath) {
+        $env:GLIDE_DOCK_PAYLOAD_ZIP = $payloadDestination
+    }
     $uninstaller = Join-Path $root 'target\release\glide-uninstall.exe'
     if (-not (Test-Path -LiteralPath $uninstaller)) { throw "Uninstaller output is missing: $uninstaller" }
     $env:GLIDE_DOCK_UNINSTALL_EXE = [IO.Path]::GetFullPath($uninstaller)
     Write-Host "Building Tauri installer $version..."
-    cargo build --locked --release -p glide-setup | Out-Host
+    if ($buildPayload) {
+        # Build with --workspace so Cargo reuses the unified feature graph
+        # compiled above; only glide-setup reruns build.rs and relinks.
+        cargo build --locked --release --workspace | Out-Host
+    } else {
+        cargo build --locked --release -p glide-setup | Out-Host
+    }
     if ($LASTEXITCODE -ne 0) { throw "Tauri installer build failed with exit code $LASTEXITCODE" }
 } finally {
     if ($hadUninstallerEnvironment) { $env:GLIDE_DOCK_UNINSTALL_EXE = $previousUninstallerEnvironment }

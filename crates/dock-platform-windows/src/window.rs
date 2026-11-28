@@ -1,16 +1,18 @@
 //! Layered popup window creation and small coordinate helpers.
 
-use windows::Win32::Foundation::{HINSTANCE, HWND, POINT};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{ClientToScreen, HBRUSH, ScreenToClient};
+use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, FindWindowW, GW_HWNDPREV, GWL_EXSTYLE, GetCursorPos,
-    GetWindow, GetWindowLongPtrW, HICON, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, LoadCursorW,
-    RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WNDCLASSW, WNDPROC, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    GetWindow, GetWindowLongPtrW, HICON, HWND_MESSAGE, HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW,
+    IsWindow, LoadCursorW, RegisterClassW, SMTO_ABORTIFHUNG, SMTO_BLOCK, SW_HIDE,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SendMessageTimeoutW, SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_COPYDATA, WNDCLASSW, WNDPROC, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::PCWSTR;
 
@@ -254,4 +256,91 @@ pub fn wide(text: &str) -> Vec<u16> {
 #[must_use]
 pub fn last_error() -> u32 {
     unsafe { windows::Win32::Foundation::GetLastError().0 }
+}
+
+/// Creates a hidden message-only window (`HWND_MESSAGE`) for cross-process IPC.
+pub fn create_message_window(instance: HINSTANCE, class_name: &str, title: &str) -> Result<HWND> {
+    let class = wide(class_name);
+    let title = wide(title);
+    unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            PCWSTR::from_raw(class.as_ptr()),
+            PCWSTR::from_raw(title.as_ptr()),
+            WINDOW_STYLE(0),
+            0,
+            0,
+            0,
+            0,
+            Some(HWND_MESSAGE),
+            None,
+            Some(instance),
+            None,
+        )
+    }
+    .map_err(|error| PlatformError::win32(&error))
+}
+
+/// Returns `true` when `hwnd` still refers to an existing Win32 window.
+#[must_use]
+pub fn is_window(hwnd: HWND) -> bool {
+    !hwnd.0.is_null() && unsafe { IsWindow(Some(hwnd)) }.as_bool()
+}
+
+/// Sends an application-tagged byte slice to `hwnd` via `WM_COPYDATA`.
+pub fn send_copydata(hwnd: HWND, tag: usize, payload: &[u8]) -> Result<()> {
+    let cb_data = u32::try_from(payload.len())
+        .map_err(|_| PlatformError::Window("WM_COPYDATA payload too large".to_string()))?;
+    let data = COPYDATASTRUCT {
+        dwData: tag,
+        cbData: cb_data,
+        lpData: payload.as_ptr() as *mut std::ffi::c_void,
+    };
+    let mut result = 0usize;
+    let ok = unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            WM_COPYDATA,
+            WPARAM(0),
+            LPARAM((&raw const data) as isize),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK,
+            1_500,
+            Some(&mut result),
+        )
+    };
+    if ok.0 == 0 {
+        Err(PlatformError::Window(
+            "WM_COPYDATA timed out or was rejected".to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Validates and copies the payload from an incoming `WM_COPYDATA` `LPARAM`.
+///
+/// # Safety
+///
+/// The caller must invoke this only while handling a live `WM_COPYDATA` message
+/// whose `lparam` points to a valid `COPYDATASTRUCT` owned by the sender.
+#[must_use]
+pub unsafe fn copydata_payload(
+    lparam: LPARAM,
+    expected_tag: usize,
+    max_bytes: usize,
+) -> Option<Vec<u8>> {
+    let ptr = lparam.0 as *const COPYDATASTRUCT;
+    if ptr.is_null() {
+        return None;
+    }
+    let data = unsafe { &*ptr };
+    if data.dwData != expected_tag || data.lpData.is_null() {
+        return None;
+    }
+    let len = data.cbData as usize;
+    if len == 0 || len > max_bytes {
+        return None;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(data.lpData.cast::<u8>(), len) };
+    Some(slice.to_vec())
 }

@@ -8,7 +8,7 @@
 - 设置中心：`app/ui/settings.slint` 定义界面，`app/src/app/settings.rs` 承载 Slint 窗口线程与命令队列。
 - 安装器：`installer/ui` 使用 React、Fluent UI React v9 和官方 Fluent Icons，`installer/src/main.rs` 承载命令与工作进程，`installer/src/engine.rs` 执行安装、更新和卸载。前端通过 Vite 构建到 `target/installer-ui` 后嵌入 EXE，运行时使用本地资源。
 - 分发：`scripts/package.ps1` 生成 Dock payload，`scripts/build-installer.ps1` 将其嵌入安装程序。
-- 旧版 `settings-app` / `setup-app` 仍保留在仓库中，不参与当前安装包的编译和发布。
+- 旧版 `settings-app` / `setup-app` 已删除，不再参与当前安装包的编译和发布。
 
 ## 已修正的问题
 

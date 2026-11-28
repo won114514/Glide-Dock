@@ -4,6 +4,7 @@
 > 关联文档：[README.md](README.md)（产品定位与路线图）· [PLAN.md](PLAN.md)（任务卡与门禁）
 > 本文取代 1.x 版本中的 `Modern Dock` 设计稿，范围、命名与选型均已对齐。
 > **实现状态**：M2 MVP 与 M4 设置中心已落地，M3 部分完成；偏差与 v0.3.3 修复记录见 §17。
+> **当前方案**：设置中心已改为 Dock 进程内 Slint UI；旧版 WinUI 3 `settings-app` 与 .NET `setup-app` 已删除，本文相关 WinUI 章节仅作历史记录。
 
 ---
 
@@ -1140,15 +1141,21 @@ path 几何）；`ItemKind::Separator`
 
 设置中心的常规页提供可展开的“开机自启动”卡片：
 
-- **快速**：`schtasks.exe /Create /XML` 注册当前用户登录任务 `Glide-Dock`，
-  `LogonTrigger Delay=PT0S`、`InteractiveToken`、`LeastPrivilege`、
-  `Priority=4`、`StartWhenAvailable=true`；动作是 `<dock exe> --autostart`。
-  创建/删除需要 UAC；
+- **快速**：`startup.rs` 通过 Task Scheduler COM 连接根任务文件夹，以
+  `TASK_CREATE_OR_UPDATE` 原子注册当前用户登录任务 `Glide-Dock`。
+  Principal 使用当前进程用户 SID，不设置 `GroupId`，登录类型
+  `InteractiveToken`、运行级别 `LeastPrivilege`；`LogonTrigger` 只绑定
+  当前用户 SID、`Delay=PT0S`，`Priority=4`、`StartWhenAvailable=true`，
+  动作是 `<dock exe> --autostart`。普通创建/删除无需 UAC，只有旧任务 ACL
+  返回 `ERROR_ACCESS_DENIED` 时才通过 UAC 启动 Dock 自身的内部 worker；路径、XML
+  或 Task Scheduler 服务错误不触发 UAC。重复的 `--autostart` 只最佳努力
+  修复已经存在的任务，不创建用户关闭的启动项；
 - **兼容**：写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Glide-Dock`，
   值为带引号的 exe 路径；无需管理员，但 Windows 可能延迟启动。
 
 `StartupManager` 保证两种机制互斥：先启用新模式，成功后再清理旧模式；关闭时先删任务
-再删 Run，任一步 UAC 取消/失败都会回退 UI。模式偏好保存在
+再删 Run。任务操作只在访问拒绝时提权；UAC 取消或快速任务创建失败会回退 HKCU Run，
+并在 UI 中保留实际状态。模式偏好保存在
 `%APPDATA%\Glide-Dock\startup-mode.txt`，不进入 `config.json`。
 
 `--autostart` 只用于任务动作：启动前最多等待 5 秒 `Progman`，避免 Explorer
@@ -1171,6 +1178,10 @@ FullColor ICO，设置中心通过 `<ApplicationIcon>`、`AppWindow.SetIcon` 和
 独立的全屏透明 layered overlay 窗口，`tiny-skia` 渲染圆角卡片、线框图标、
 子菜单箭头和 canvas 子菜单。主菜单为打开设置 / 外观 / Dock 层级 / 退出；
 不再包含权限诊断、重载或配置目录入口。`TaskbarCreated` 消息触发重新注册。
+首次 `NIM_ADD` 失败时仍保留托盘对象、图标和消息 ID，并按 1、2、4、8、16、29 秒
+退避重试约 60 秒；成功后或超时后均停止计时器。Explorer 重启会立即重装并重置短时
+重试窗口；并发的 `--autostart` 通过 `WM_APP_ENSURE_TRAY` 请求已有 Dock 恢复托盘，
+发送方有界等待窗口绑定 `GWLP_USERDATA` 后的确认响应，始终不创建第二个 Dock。
 
 守护进程复用 `glide-dock.exe --guard --guard-pid <pid> --config <abs>`。Dock 启动后
 spawn 隐藏 guard；guard 用 `Local\Glide-Dock.Guard` 互斥量、`OpenProcess` +
