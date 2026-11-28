@@ -7,8 +7,39 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
 jobs:
-  windows:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: installer/ui/package-lock.json
+      - name: Build installer frontend
+        working-directory: installer/ui
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Upload installer frontend
+        uses: actions/upload-artifact@v7
+        with:
+          name: installer-ui-dist
+          path: target/installer-ui
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  lint:
+    needs: frontend
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -18,32 +49,71 @@ jobs:
           components: rustfmt, clippy
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+      - name: Download installer frontend
+        uses: actions/download-artifact@v8
+        with:
+          name: installer-ui-dist
+          path: target/installer-ui
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  test:
+    needs: frontend
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
       - name: Install Node.js
         uses: actions/setup-node@v6
         with:
           node-version: "24"
           cache: npm
           cache-dependency-path: installer/ui/package-lock.json
-      - name: Build Fluent UI installer frontend
-        shell: pwsh
-        run: .\scripts\build-installer-ui.ps1
+      - name: Download installer frontend
+        uses: actions/download-artifact@v8
+        with:
+          name: installer-ui-dist
+          path: target/installer-ui
       - name: Test installer interface
         working-directory: installer/ui
         run: |
+          npm ci --no-audit --no-fund
           npx playwright install chromium
           npm test
       - name: Test CNB publisher
         run: node --test scripts/tests/publish-cnb.test.mjs scripts/tests/mirror-github-release.test.mjs
-      - name: Format
-        run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Test
         env:
           RUST_TEST_THREADS: 1
         run: cargo test --locked --workspace
-      - name: Release build
-        run: cargo build --locked --release -p glide-dock
+
+  release:
+    needs: [lint, test]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: false
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: installer/ui/package-lock.json
+      - name: Download installer frontend
+        uses: actions/download-artifact@v8
+        with:
+          name: installer-ui-dist
+          path: target/installer-ui
       - name: Verify release tag version
         shell: pwsh
         run: |
@@ -66,7 +136,7 @@ jobs:
           compression-level: 0
 
   publish-github:
-    needs: windows
+    needs: release
     runs-on: ubuntu-latest
     permissions:
       contents: write
